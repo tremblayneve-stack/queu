@@ -146,6 +146,8 @@ def analyze_trades(path):
                 "mae": float(d["mae_r"]),
                 "er": float(d["efficiency_ratio"]),
                 "adx": float(d["adx"]),
+                "reg_r2": float(d.get("reg_r2") or 0.0),
+                "reg_slope": float(d.get("reg_slope_atr") or 0.0),
                 "spread": float(d["spread_pts"]),
                 "hour": int(float(d["hour"])),
                 "dow": int(float(d["day_of_week"])),
@@ -234,6 +236,16 @@ def analyze_trades(path):
     bucket_table(rows, lambda r: f"ADX {int(r['adx'] // 10) * 10}-{int(r['adx'] // 10) * 10 + 10}",
                  "force ADX")
 
+    if any(r["reg_r2"] > 0 for r in rows):
+        print()
+        bucket_table(rows, lambda r: f"R2 {math.floor(r['reg_r2'] * 5) / 5:.1f}-"
+                                     f"{math.floor(r['reg_r2'] * 5) / 5 + 0.2:.1f}",
+                     "qualite tendance")
+        print()
+        bucket_table(rows, lambda r: f"pente {math.floor(r['reg_slope'])}"
+                                     f" a {math.floor(r['reg_slope']) + 1} ATR",
+                     "pente longue")
+
     title("Lecture")
     print("  Un groupe a esperance negative avec assez de trades est un candidat")
     print("  a l'exclusion par filtre (session, seuil d'ER, seuil d'ADX).")
@@ -292,7 +304,9 @@ def analyze_passes(path):
     title("Profit brut contre Sharpe deflate : le meme classement ?")
     by_profit = sorted(rows, key=lambda r: r.get("net_profit", 0), reverse=True)
     by_dsr = sorted(rows, key=lambda r: r["sharpe_per_trade"], reverse=True)
-    cols = ["channel_period", "sl_atr", "trail_atr", "breakout_atr", "er_min", "adx_min"]
+    cols = ["channel_period", "sl_atr", "trail_atr", "breakout_atr", "er_min",
+            "adx_min", "reg_base", "reg_min_r2", "reg_entry_sigma"]
+    cols = [c for c in cols if any(c in r for r in rows)]
 
     def line(r):
         prm = " ".join(f"{c.split('_')[0]}={r.get(c, 0):g}" for c in cols if c in r)

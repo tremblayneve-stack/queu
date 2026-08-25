@@ -1,43 +1,44 @@
-; QueuBreakoutEA - BTCUSD H1, moteur CASSURE de canal Donchian.
-; Stops et marge de cassure elargis : le bruit intra-bougie du BTC fait
-; sortir un stop a 2 ATR beaucoup plus souvent que sur l'or.
-; Filtre de tendance en H4 : le H1 du BTC change de regime trop souvent.
-InpEngine=0
-InpMagic=770102
-InpComment=QueuBrk-BTC
+; QueuBreakoutEA - XAUUSD H1, moteur CHAINE DE REGRESSIONS.
+; Achete le repli en tendance, la ou le moteur de cassure achete la
+; cassure : les deux ne se declenchent pas aux memes moments.
+; Regime lu sur les echelons 2N/4N/8N ; l'echelon N sert au timing et
+; au stop via sigma. Magic distinct : peut tourner en parallele.
+InpEngine=1
+InpMagic=770103
+InpComment=QueuReg-XAU
 InpTimeframe=16385
-InpSlippagePoints=100
+InpSlippagePoints=30
 InpShowPanel=true
-InpChannelPeriod=24
+InpChannelPeriod=20
 InpATRPeriod=14
 InpAllowLong=true
 InpAllowShort=true
 InpCloseOnOpposite=false
 InpUseTrendFilter=true
-InpTrendTF=16388
+InpTrendTF=0
 InpEmaFast=21
 InpEmaSlow=50
 InpUseADXFilter=true
 InpADXPeriod=14
-InpADXMin=22.0
+InpADXMin=20.0
 InpMinATRPoints=0.0
 InpMaxSpreadPoints=0.0
-InpMaxSpreadATRRatio=0.15
-InpRiskPercent=0.35
+InpMaxSpreadATRRatio=0.12
+InpRiskPercent=0.5
 InpFixedLot=0.0
 InpForceMinLot=false
 InpMaxPositions=1
 InpMaxDailyLossPct=3.0
 InpMaxDailyProfitPct=0.0
-InpCooldownBars=3
-InpSL_ATR=2.5
+InpCooldownBars=2
+InpSL_ATR=2.0
 InpTP_ATR=0.0
 InpUseBreakEven=true
-InpBE_ATR=1.2
+InpBE_ATR=1.0
 InpBE_LockATR=0.10
 InpUseTrailing=true
 InpTrail_ATR=2.5
-InpTrailStepPoints=100.0
+InpTrailStepPoints=20.0
 InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35
@@ -48,8 +49,8 @@ InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
 InpUseERFilter=true
 InpERPeriod=20
-InpERMin=0.35
-InpBreakoutATR=0.15
+InpERMin=0.30
+InpBreakoutATR=0.10
 InpUseDDThrottle=true
 InpDD_ThrottleStart=5.0
 InpDD_ThrottleFull=15.0
@@ -68,7 +69,7 @@ InpTester_MinTrades=30
 InpTester_Trials=0
 InpTester_TrialsSD=0.0
 InpTester_MaxDDPct=30.0
-InpUseSession=false
-InpSessionFrom=0
-InpSessionTo=0
-InpSkipWeekend=true
+InpUseSession=true
+InpSessionFrom=7
+InpSessionTo=20
+InpSkipWeekend=false

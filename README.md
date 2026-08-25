@@ -15,7 +15,9 @@ décider s'il a réellement un edge.
 
 ## Sommaire
 
-- [Stratégie](#stratégie)
+- [Deux moteurs d'entrée](#deux-moteurs-dentrée)
+- [Moteur 1 — cassure de canal](#moteur-1--cassure-de-canal)
+- [Moteur 2 — chaîne de régressions linéaires](#moteur-2--chaîne-de-régressions-linéaires)
 - [Ce qui améliore réellement le rendement](#ce-qui-améliore-réellement-le-rendement)
   - [1. Le critère d'optimisation (levier principal)](#1-le-critère-doptimisation-levier-principal)
   - [2. Le sizing adaptatif](#2-le-sizing-adaptatif)
@@ -29,7 +31,28 @@ décider s'il a réellement un edge.
 
 ---
 
-## Stratégie
+## Deux moteurs d'entrée
+
+`InpEngine` choisit la condition d'entrée. **Les deux moteurs partagent
+intégralement** la gestion du risque, les garde-fous, le journal et le critère
+d'optimisation — seule la condition d'entrée diffère.
+
+| Moteur | Achète… | Stop indexé sur |
+|---|---|---|
+| `QUEU_ENGINE_BREAKOUT` | la **cassure** du canal Donchian | ATR |
+| `QUEU_ENGINE_REGRESSION` | le **repli** dans une tendance établie | σ des résidus |
+| `QUEU_ENGINE_BOTH` | les deux, premier signal servi | selon le moteur |
+
+Ce ne sont pas deux variantes du même signal : l'un entre quand le prix
+s'échappe, l'autre quand il revient. **Ils ne se déclenchent pas aux mêmes
+moments**, ce qui les rend combinables — et comparables, puisque le journal
+enregistre le contexte de régression même pour les trades de cassure. Tu peux
+donc demander après coup : *les cassures rendent-elles mieux quand la tendance
+de fond est nette ?*
+
+---
+
+## Moteur 1 — cassure de canal
 
 Cassure de volatilité (*volatility breakout*) : le schéma qui correspond au
 comportement de l'or et du BTC, faits de longues compressions suivies
@@ -59,6 +82,84 @@ un TP coupe précisément les trades longs qui font la rentabilité de l'approch
 Le TP partiel est également désactivé par défaut — il **réduit la variance mais
 aussi l'espérance**. À activer seulement si le journal montre que les gains
 latents sont mal capturés.
+
+---
+
+## Moteur 2 — chaîne de régressions linéaires
+
+### Pourquoi une régression plutôt qu'un canal
+
+Le Donchian dit **où** le prix est allé, mais rien sur la **qualité du chemin**.
+Une régression OLS sur les clôtures donne trois informations d'un seul calcul :
+
+| Sortie | Interprétation |
+|---|---|
+| **pente** β | direction et vitesse du régime |
+| **R²** | quelle fraction du mouvement est linéaire plutôt que du bruit |
+| **σ** des résidus | volatilité **autour de la tendance**, pas amplitude absolue du prix |
+
+Le R² est le cousin statistiquement fondé du ratio d'efficience. Et σ donne une
+unité de stop plus fine que l'ATR : elle mesure l'écart **à la droite**, donc un
+stop à 2,5 σ est serré dans une tendance propre et large dans une tendance
+chahutée — automatiquement, sans paramètre supplémentaire.
+
+### La chaîne
+
+Quatre régressions emboîtées sur une échelle géométrique **N, 2N, 4N, 8N**,
+toutes se terminant sur la même bougie. Chaque pente est normalisée :
+
+```
+slopeATR = β × N / ATR        →  « ATR parcourus par fenêtre »
+```
+
+Cette normalisation n'est pas cosmétique. Pour une même tendance relative, la
+pente brute de l'or vaut 0,40 et celle du BTC 12,00 — un facteur 30. Une fois
+normalisées, **les deux valent exactement 3,200**. C'est ce qui rend un seuil
+unique utilisable sur les deux instruments.
+
+### La logique d'entrée
+
+1. **Régime** = accord des signes de pente sur les échelons **longs**
+   (`InpReg_RegimeFrom=1` → 2N, 4N, 8N). L'échelon court est exclu à dessein :
+   pendant un repli sa pente s'inverse alors que le régime de fond tient
+   toujours — et c'est précisément ce repli qu'on cherche à acheter.
+2. **Qualité** : R² de l'échelon long ≥ `InpReg_MinR2`, et pente normalisée
+   ≥ `InpReg_MinSlopeATR`.
+3. **Timing** : le prix doit être retombé sous la droite courte d'au moins
+   `InpReg_EntrySigma × σ`.
+4. **Garde-fou de structure** : le prix doit rester du bon côté de la droite
+   longue (`InpReg_RequireAboveLong`). Sinon ce n'est plus un repli, c'est une
+   cassure de tendance en cours.
+5. **Stop** placé à `InpReg_StopSigma × σ` de la droite courte. Si le repli est
+   déjà plus profond que ce niveau, **le setup est invalidé** : il ne reste plus
+   de place entre l'entrée et l'invalidation. Ce garde-fou découle de la
+   géométrie, il n'a pas de paramètre.
+
+`InpReg_StopSigma` doit dépasser `InpReg_EntrySigma`, sinon le stop est atteint
+dès l'entrée — l'EA refuse de démarrer dans ce cas.
+
+### Sortie sur rupture de régime
+
+`InpReg_ExitOnBreak` ferme la position quand les pentes cessent de s'accorder.
+**Seul le désaccord de signe déclenche la sortie, pas la baisse de qualité** :
+réappliquer les seuils d'entrée ferait sortir bien trop tôt, un R² se dégradant
+naturellement à chaque respiration du marché.
+
+### Ce que ce moteur n'applique pas
+
+Les filtres EMA / ADX / efficience sont **ignorés** en mode régression : la
+chaîne fait déjà ce travail, avec ses seuils de R² et de pente. Les empiler
+serait redondant et sur-filtrerait. Les filtres de **coût** (spread, ATR
+minimum) et tous les garde-fous de risque restent actifs.
+
+### Validation
+
+Les formules OLS ont été vérifiées contre une implémentation de référence à
+résidus explicites : **erreur relative maximale 7,8 × 10⁻¹⁴** sur six jeux de
+données (tendance pure, tendance bruitée, série plate, baissière, échelle BTC,
+échelle or). L'identité de forme fermée `Sxx = n(n²−1)/12` est exacte jusqu'à
+n = 321, et les cas limites (série constante, droite parfaite) ne produisent ni
+division par zéro ni R² hors de [0, 1].
 
 ---
 
@@ -169,7 +270,8 @@ python3 tools/analyze_queu.py passes  Queu_Passes_XAUUSD.csv
 ```
 
 Le mode `trades` produit l'espérance en R par direction, par heure, par jour, par
-tranche d'efficience et par tranche d'ADX, signale les groupes à espérance
+tranche d'efficience, par tranche d'ADX, et — quand le journal les contient —
+par tranche de **R²** et de **pente normalisée**. Il signale les groupes à espérance
 négative, et analyse les excursions (« la moitié du gain latent est-elle
 rendue ? », « les perdants passaient-ils près de 1 R de gain ? »).
 
@@ -192,6 +294,7 @@ MQL5/Experts/Queu/QueuBreakoutEA.mq5
 MQL5/Include/Queu/Utils.mqh
 MQL5/Include/Queu/Risk.mqh
 MQL5/Include/Queu/Stats.mqh
+MQL5/Include/Queu/Regression.mqh
 MQL5/Include/Queu/Journal.mqh
 MQL5/Presets/*.set
 ```
@@ -248,8 +351,13 @@ L'outil affiche les deux valeurs exactes à recopier.
 
 | Fichier | Instrument | Particularités |
 |---|---|---|
-| `QueuBreakoutEA_XAUUSD_H1.set` | XAUUSD H1 | Session 07h–20h, stops 2 ATR, marge de cassure 0,10 ATR, ER ≥ 0,30, risque 0,5 % |
-| `QueuBreakoutEA_BTCUSD_H1.set` | BTCUSD H1 | 24/7 sauf week-end, tendance en H4, stops 2,5 ATR, marge 0,15 ATR, ER ≥ 0,35, risque 0,35 % |
+| `QueuBreakoutEA_XAUUSD_H1.set` | XAUUSD H1 | **Cassure.** Session 07h–20h, stops 2 ATR, marge 0,10 ATR, ER ≥ 0,30, risque 0,5 % |
+| `QueuBreakoutEA_BTCUSD_H1.set` | BTCUSD H1 | **Cassure.** 24/7 sauf week-end, tendance H4, stops 2,5 ATR, marge 0,15 ATR, risque 0,35 % |
+| `QueuRegression_XAUUSD_H1.set` | XAUUSD H1 | **Régression.** N=20, R² ≥ 0,35, repli 1,0 σ, stop 2,5 σ, magic 770103 |
+| `QueuRegression_BTCUSD_H1.set` | BTCUSD H1 | **Régression.** N=24, R² ≥ 0,30, repli 1,2 σ, stop 3,0 σ, magic 770104 |
+
+Les magic numbers des presets de régression sont distincts : les deux moteurs
+peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.
 
 Les écarts ne sont pas cosmétiques :
 
@@ -261,6 +369,9 @@ Les écarts ne sont pas cosmétiques :
   week-end élargit les spreads et fabrique des cassures qui ne tiennent pas.
 - **Session restreinte sur l'or** — les cassures hors Londres/New York ont peu
   de volume derrière elles.
+- **Repli plus profond et stop plus large sur BTC en régression** (1,2 σ / 3,0 σ
+  contre 1,0 σ / 2,5 σ) — la dispersion du BTC autour de la droite a des queues
+  plus épaisses ; un stop à 2,5 σ serait emporté par la simple respiration.
 - **Filtre spread/ATR plutôt qu'en points absolus** — 400 points de spread est
   normal sur BTC et catastrophique sur l'or ; seul le ratio est comparable.
 

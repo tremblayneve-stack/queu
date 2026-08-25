@@ -18,12 +18,26 @@
 #include <Queu/Utils.mqh>
 #include <Queu/Risk.mqh>
 #include <Queu/Stats.mqh>
+#include <Queu/Regression.mqh>
 #include <Queu/Journal.mqh>
 
 //+------------------------------------------------------------------+
 //| Parametres                                                        |
 //+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Moteur d'entree. Les deux moteurs partagent toute la gestion du   |
+//| risque, le journal et le critere d'optimisation ; seule la        |
+//| condition d'entree differe.                                        |
+//+------------------------------------------------------------------+
+enum ENUM_QUEU_ENGINE
+  {
+   QUEU_ENGINE_BREAKOUT   = 0,   // Cassure de canal Donchian
+   QUEU_ENGINE_REGRESSION = 1,   // Chaine de regressions : repli en tendance
+   QUEU_ENGINE_BOTH       = 2    // Les deux (premier signal servi)
+  };
+
 input group "=== General ==="
+input ENUM_QUEU_ENGINE InpEngine            = QUEU_ENGINE_BREAKOUT; // Moteur d'entree
 input ulong           InpMagic              = 770101;    // Magic number
 input string          InpComment            = "QueuBrk"; // Commentaire des ordres
 input ENUM_TIMEFRAMES InpTimeframe          = PERIOD_H1; // Timeframe de travail
@@ -69,6 +83,16 @@ input double          InpBE_LockATR         = 0.10;      // Verrouille ATR x au-
 input bool            InpUseTrailing        = true;      // Activer le trailing stop
 input double          InpTrail_ATR          = 2.0;       // Distance du trailing = ATR x
 input double          InpTrailStepPoints    = 20.0;      // Amelioration min pour deplacer le stop (points)
+
+input group "=== Chaine de regressions lineaires ==="
+input int             InpReg_BasePeriod     = 20;        // Echelon court N (les autres : 2N, 4N, 8N)
+input int             InpReg_RegimeFrom     = 1;         // Premier echelon du regime (0=N, 1=2N...)
+input double          InpReg_MinR2          = 0.35;      // R2 minimum de l'echelon long
+input double          InpReg_MinSlopeATR    = 1.00;      // Pente min de l'echelon long (ATR/fenetre)
+input double          InpReg_EntrySigma     = 1.00;      // Repli requis sous la droite courte (x sigma)
+input double          InpReg_StopSigma      = 2.50;      // Stop a x sigma de la droite courte
+input bool            InpReg_RequireAboveLong = true;    // Exiger le prix du bon cote de l'echelon long
+input bool            InpReg_ExitOnBreak    = true;      // Sortir si le regime se casse
 
 input group "=== Qualite du signal ==="
 input bool            InpUseERFilter        = true;      // Filtre ratio d'efficience (Kaufman)
@@ -314,14 +338,16 @@ bool HasMarginFor(const ENUM_ORDER_TYPE type, const double volume, const double 
 //+------------------------------------------------------------------+
 //| Ouvre une position dans la direction demandee.                    |
 //+------------------------------------------------------------------+
-bool OpenTrade(const bool isBuy, const double atr)
+bool OpenTrade(const bool isBuy, const double atr, const double slDistRequested)
   {
    double entry = isBuy ? SymbolInfoDouble(g_sym, SYMBOL_ASK)
                         : SymbolInfoDouble(g_sym, SYMBOL_BID);
    if(entry <= 0.0)
       return false;
 
-   double slDist = atr * InpSL_ATR;
+   //--- chaque moteur impose sa propre distance de stop : ATR pour la
+   //--- cassure, sigma de la regression pour le repli en tendance
+   double slDist  = slDistRequested;
    double minDist = QMinStopDistance(g_sym);
 
    // le broker impose une distance plancher : on elargit plutot que de
@@ -411,6 +437,17 @@ bool OpenTrade(const bool isBuy, const double atr)
       if(g_hADX != INVALID_HANDLE)
          CopyOne(g_hADX, 0, 1, adxVal);
 
+      //--- enregistre le contexte de regression meme pour un trade de
+      //--- cassure : cela permet de demander apres coup si les cassures
+      //--- rendent mieux quand la tendance de fond est nette
+      double regSlope = 0.0, regR2 = 0.0;
+      QRegChain ctxChain;
+      if(QRegChainCompute(g_sym, g_tf, InpReg_BasePeriod, 1, atr, ctxChain))
+        {
+         regSlope = ctxChain.rung[QUEU_REG_RUNGS - 1].slopeATR;
+         regR2    = ctxChain.rung[QUEU_REG_RUNGS - 1].r2;
+        }
+
       QTradeCtx ctx;
       ctx.ticket      = posId;
       ctx.openTime    = TimeCurrent();
@@ -423,6 +460,8 @@ bool OpenTrade(const bool isBuy, const double atr)
       ctx.atr         = atr;
       ctx.er          = QEfficiencyRatio(g_sym, g_tf, InpERPeriod, 1);
       ctx.adx         = adxVal;
+      ctx.regSlopeATR = regSlope;
+      ctx.regR2       = regR2;
       ctx.spreadPts   = QSpreadPoints(g_sym);
       ctx.mfe         = 0.0;
       ctx.mae         = 0.0;
@@ -577,17 +616,20 @@ void ManageOpenPositions(const double atr)
   }
 
 //+------------------------------------------------------------------+
-//| Evalue le signal sur la bougie qui vient de cloturer.             |
+//| Moteur 1 — cassure de canal Donchian.                             |
+//| Retourne +1 / -1 dans 'dir' et la distance de stop associee.      |
 //+------------------------------------------------------------------+
-void EvaluateSignal(const double atr)
+bool BreakoutSignal(const double atr, int &dir, double &slDist)
   {
+   dir = 0;
+
    double upper, lower;
    if(!ChannelBounds(upper, lower))
-      return;
+      return false;
 
    double close1 = iClose(g_sym, g_tf, 1);
    if(close1 <= 0.0)
-      return;
+      return false;
 
    //--- marge de cassure : exiger un depassement d'une fraction d'ATR
    //--- ecarte les cassures marginales, qui sont majoritairement du bruit
@@ -597,7 +639,7 @@ void EvaluateSignal(const double atr)
    bool breakDown = (close1 < lower - margin);
 
    if(!breakUp && !breakDown)
-      return;
+      return false;
 
    //--- signal inverse : on peut liberer la position existante d'abord
    if(InpCloseOnOpposite)
@@ -611,9 +653,9 @@ void EvaluateSignal(const double atr)
    //--- filtres directionnels
    int bias = TrendBias();
    if(bias > 0 && breakDown)
-      return;
+      return false;
    if(bias < 0 && breakUp)
-      return;
+      return false;
 
    if(InpUseADXFilter)
      {
@@ -621,7 +663,7 @@ void EvaluateSignal(const double atr)
       if(!CopyOne(g_hADX, 0, 1, adx) || adx < InpADXMin)
         {
          g_blockReason = "ADX sous le seuil";
-         return;
+         return false;
         }
      }
 
@@ -633,18 +675,177 @@ void EvaluateSignal(const double atr)
       if(er < InpERMin)
         {
          g_blockReason = StringFormat("ratio d'efficience %.2f < %.2f", er, InpERMin);
-         return;
+         return false;
         }
      }
+
+   if(breakUp && InpAllowLong)
+      dir = 1;
+   else
+      if(breakDown && InpAllowShort)
+         dir = -1;
+
+   if(dir == 0)
+      return false;
+
+   slDist = atr * InpSL_ATR;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Moteur 2 — chaine de regressions lineaires : repli en tendance.    |
+//|                                                                   |
+//| Le regime est defini par l'accord des pentes sur les echelons     |
+//| LONGS (2N, 4N, 8N par defaut). L'echelon court est exclu a        |
+//| dessein : pendant un repli sa pente s'inverse alors que le regime |
+//| de fond tient toujours — et c'est ce repli que l'on achete.       |
+//|                                                                   |
+//| L'echelon court sert au timing et au stop, via sigma, qui mesure  |
+//| la dispersion AUTOUR DE LA DROITE et non l'amplitude du prix.     |
+//|                                                                   |
+//| Ce moteur n'applique pas les filtres EMA / ADX / efficience : la  |
+//| chaine fait deja ce travail, avec ses seuils de R2 et de pente.   |
+//| Les filtres de cout (spread, ATR) restent actifs via EntryAllowed.|
+//+------------------------------------------------------------------+
+bool RegressionSignal(const double atr, int &dir, double &slDist)
+  {
+   dir = 0;
+
+   QRegChain chain;
+   if(!QRegChainCompute(g_sym, g_tf, InpReg_BasePeriod, 1, atr, chain))
+      return false;
+
+   int regime = QRegChainBias(chain, InpReg_RegimeFrom,
+                              InpReg_MinSlopeATR, InpReg_MinR2);
+   if(regime == 0)
+     {
+      g_blockReason = "regime de regression non etabli";
+      return false;
+     }
+
+   QRegResult shortRung = chain.rung[0];
+   QRegResult longRung  = chain.rung[QUEU_REG_RUNGS - 1];
+
+   if(shortRung.sigma <= 0.0)
+      return false;
+
+   double close1 = iClose(g_sym, g_tf, 1);
+   if(close1 <= 0.0)
+      return false;
+
+   double offset = InpReg_EntrySigma * shortRung.sigma;
+   double stopPx = 0.0;
+
+   if(regime > 0)
+     {
+      if(!InpAllowLong)
+         return false;
+
+      //--- le prix doit etre retombe sous la droite courte : on achete
+      //--- le repli, pas la poursuite
+      if(close1 > shortRung.value - offset)
+        {
+         g_blockReason = "pas de repli suffisant sous la droite";
+         return false;
+        }
+
+      //--- mais rester du bon cote de la structure longue, sinon ce n'est
+      //--- plus un repli : c'est une cassure de tendance en cours
+      if(InpReg_RequireAboveLong && close1 < longRung.value)
+        {
+         g_blockReason = "prix sous la droite longue : repli invalide";
+         return false;
+        }
+
+      stopPx = shortRung.value - InpReg_StopSigma * shortRung.sigma;
+      slDist = close1 - stopPx;
+      dir    = 1;
+     }
+   else
+     {
+      if(!InpAllowShort)
+         return false;
+
+      if(close1 < shortRung.value + offset)
+        {
+         g_blockReason = "pas de rebond suffisant au-dessus de la droite";
+         return false;
+        }
+
+      if(InpReg_RequireAboveLong && close1 > longRung.value)
+        {
+         g_blockReason = "prix au-dessus de la droite longue : rebond invalide";
+         return false;
+        }
+
+      stopPx = shortRung.value + InpReg_StopSigma * shortRung.sigma;
+      slDist = stopPx - close1;
+      dir    = -1;
+     }
+
+   //--- un repli deja plus profond que le stop invalide le setup :
+   //--- il n'y a plus de place entre l'entree et l'invalidation
+   if(slDist <= 0.0)
+     {
+      g_blockReason = "repli au-dela du niveau de stop";
+      dir = 0;
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Sortie sur rupture de regime, pour les positions du moteur de     |
+//| regression.                                                       |
+//|                                                                   |
+//| Seul le DESACCORD DE SIGNE declenche la sortie, pas la baisse de  |
+//| qualite : reappliquer les seuils d'entree ferait sortir bien trop |
+//| tot, un R2 se degradant naturellement pendant chaque respiration. |
+//+------------------------------------------------------------------+
+void CheckRegimeExit(const double atr)
+  {
+   if(!InpReg_ExitOnBreak || InpEngine == QUEU_ENGINE_BREAKOUT)
+      return;
+   if(CountOwnPositions() == 0)
+      return;
+
+   QRegChain chain;
+   if(!QRegChainCompute(g_sym, g_tf, InpReg_BasePeriod, 1, atr, chain))
+      return;
+
+   int regime = QRegChainBias(chain, InpReg_RegimeFrom, 0.0, 0.0);
+
+   if(regime <= 0)
+      CloseDirection(POSITION_TYPE_BUY);
+   if(regime >= 0)
+      CloseDirection(POSITION_TYPE_SELL);
+  }
+
+//+------------------------------------------------------------------+
+//| Evalue le signal sur la bougie qui vient de cloturer.              |
+//+------------------------------------------------------------------+
+void EvaluateSignal(const double atr)
+  {
+   int    dir    = 0;
+   double slDist = 0.0;
+   bool   signal = false;
+
+   if(InpEngine == QUEU_ENGINE_BREAKOUT || InpEngine == QUEU_ENGINE_BOTH)
+      signal = BreakoutSignal(atr, dir, slDist);
+
+   //--- en mode BOTH, la regression n'est consultee que si la cassure
+   //--- n'a rien produit : premier signal servi
+   if(!signal && (InpEngine == QUEU_ENGINE_REGRESSION || InpEngine == QUEU_ENGINE_BOTH))
+      signal = RegressionSignal(atr, dir, slDist);
+
+   if(!signal || dir == 0 || slDist <= 0.0)
+      return;
 
    if(!EntryAllowed(atr))
       return;
 
-   if(breakUp && InpAllowLong)
-      OpenTrade(true, atr);
-   else
-      if(breakDown && InpAllowShort)
-         OpenTrade(false, atr);
+   OpenTrade(dir > 0, atr, slDist);
   }
 
 //+------------------------------------------------------------------+
@@ -676,18 +877,38 @@ void UpdatePanel(const double atr)
             kelly = StringFormat("p=%.2f b=%.2f f*=%+.3f", kp, kb, kf);
      }
 
+   //--- etat de la chaine de regressions, quand elle est en service
+   string reg = "off";
+   if(InpEngine != QUEU_ENGINE_BREAKOUT)
+     {
+      QRegChain c;
+      if(QRegChainCompute(g_sym, g_tf, InpReg_BasePeriod, 1, atr, c))
+        {
+         int rg = QRegChainBias(c, InpReg_RegimeFrom, InpReg_MinSlopeATR, InpReg_MinR2);
+         reg = StringFormat("%s  R2=%.2f  pente=%+.2f ATR/fen.  sigma=%.5f",
+                            (rg > 0 ? "HAUSSIER" : (rg < 0 ? "BAISSIER" : "aucun")),
+                            c.rung[QUEU_REG_RUNGS - 1].r2,
+                            c.rung[QUEU_REG_RUNGS - 1].slopeATR,
+                            c.rung[0].sigma);
+        }
+      else
+         reg = "historique insuffisant";
+     }
+
    string txt = StringFormat(
-                   "QueuBreakoutEA  |  %s %s\n"
+                   "QueuBreakoutEA  |  %s %s  |  moteur %s\n"
                    "ATR: %.5f (%.0f pts)   Spread: %.0f pts   ER: %.2f\n"
                    "Positions EA: %d / %d\n"
                    "Risque prochain trade: %.3f%%  (base %.2f%%)   Kelly: %s\n"
                    "Equity debut de journee: %.2f   Equity: %.2f\n"
+                   "Regression: %s\n"
                    "Etat: %s",
-                   g_sym, EnumToString(g_tf),
+                   g_sym, EnumToString(g_tf), EnumToString(InpEngine),
                    atr, (point > 0.0 ? atr / point : 0.0), QSpreadPoints(g_sym), er,
                    CountOwnPositions(), InpMaxPositions,
                    riskNow, InpRiskPercent, kelly,
                    g_guard.EquityAtOpen(), AccountInfoDouble(ACCOUNT_EQUITY),
+                   reg,
                    (g_blockReason == "" ? "actif" : g_blockReason));
 
    Comment(txt);
@@ -755,6 +976,39 @@ int OnInit(void)
             "le seuil ne serait jamais atteint.");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpEngine != QUEU_ENGINE_BREAKOUT)
+     {
+      if(InpReg_BasePeriod < 3)
+        {
+         Print("[Queu] InpReg_BasePeriod doit valoir au moins 3.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpReg_RegimeFrom < 0 || InpReg_RegimeFrom >= QUEU_REG_RUNGS)
+        {
+         PrintFormat("[Queu] InpReg_RegimeFrom doit etre dans [0, %d].", QUEU_REG_RUNGS - 1);
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpReg_MinR2 < 0.0 || InpReg_MinR2 > 1.0)
+        {
+         Print("[Queu] InpReg_MinR2 doit etre dans [0, 1] : c'est un coefficient "
+               "de determination.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpReg_StopSigma <= InpReg_EntrySigma)
+        {
+         Print("[Queu] InpReg_StopSigma doit depasser InpReg_EntrySigma, sinon le "
+               "stop est atteint des l'entree et aucun trade n'est possible.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+
+      //--- l'echelon le plus long consomme 8N bougies : verifier la profondeur
+      int needed = InpReg_BasePeriod * 8;
+      if(Bars(g_sym, g_tf) < needed + 10)
+         PrintFormat("[Queu] Attention : %d bougies disponibles, l'echelon long en "
+                     "demande %d. Le moteur restera inactif jusqu'a ce que "
+                     "l'historique soit suffisant.", Bars(g_sym, g_tf), needed);
+     }
+
    if(InpUsePartial && (InpPartialPct <= 0.0 || InpPartialPct >= 100.0))
      {
       Print("[Queu] InpPartialPct doit etre dans ]0, 100[.");
@@ -845,7 +1099,10 @@ void OnTick(void)
 
    //--- les entrees, elles, ne sont evaluees qu'a la cloture d'une bougie
    if(QIsNewBar(g_sym, g_tf, g_lastBar))
+     {
+      CheckRegimeExit(atr);   // liberer avant d'evaluer une nouvelle entree
       EvaluateSignal(atr);
+     }
 
    UpdatePanel(atr);
   }
@@ -901,14 +1158,15 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
 //+------------------------------------------------------------------+
 //| Colonnes du resume de passe, partagees entre agent et terminal.   |
 //+------------------------------------------------------------------+
-#define QUEU_STAT_COLS 17
+#define QUEU_STAT_COLS 21
 
 string QueuTesterHeader(void)
   {
    return "n_trades,sharpe_per_trade,sortino,max_dd_pct,psr_vs_zero,dsr,"
           "net_profit,profit_factor,mean_return_pct,"
           "channel_period,atr_period,sl_atr,trail_atr,"
-          "breakout_atr,er_min,adx_min,risk_pct";
+          "breakout_atr,er_min,adx_min,risk_pct,"
+          "engine,reg_base,reg_min_r2,reg_entry_sigma";
   }
 
 //+------------------------------------------------------------------+
@@ -941,7 +1199,9 @@ void QueuWriteTesterRow(const double &st[])
                 DoubleToString(st[9],  0), DoubleToString(st[10], 0),
                 DoubleToString(st[11], 3), DoubleToString(st[12], 3),
                 DoubleToString(st[13], 3), DoubleToString(st[14], 3),
-                DoubleToString(st[15], 2), DoubleToString(st[16], 4));
+                DoubleToString(st[15], 2), DoubleToString(st[16], 4),
+                DoubleToString(st[17], 0), DoubleToString(st[18], 0),
+                DoubleToString(st[19], 3), DoubleToString(st[20], 3));
       FileClose(h);
       return;
      }
@@ -1052,6 +1312,10 @@ double OnTester(void)
    st[14] = InpERMin;
    st[15] = InpADXMin;
    st[16] = InpRiskPercent;
+   st[17] = (double)InpEngine;
+   st[18] = (double)InpReg_BasePeriod;
+   st[19] = InpReg_MinR2;
+   st[20] = InpReg_EntrySigma;
 
    if(MQLInfoInteger(MQL_OPTIMIZATION))
       FrameAdd("queu", 0, dsr, st);       // collecte centralisee par le terminal

@@ -31,6 +31,8 @@ struct QTradeCtx
    double            atr;
    double            er;           // ratio d'efficience de Kaufman
    double            adx;
+   double            regSlopeATR;  // pente normalisee de l'echelon long
+   double            regR2;        // qualite de tendance de l'echelon long
    double            spreadPts;
    double            mfe;          // excursion favorable max, en prix
    double            mae;          // excursion adverse max, en prix
@@ -76,7 +78,8 @@ private:
                    "entry", "exit", "sl", "tp",
                    "risk_price", "risk_pct", "r_multiple", "pnl_money",
                    "mfe_r", "mae_r",
-                   "atr", "efficiency_ratio", "adx", "spread_pts",
+                   "atr", "efficiency_ratio", "adx",
+                   "reg_slope_atr", "reg_r2", "spread_pts",
                    "hour", "day_of_week", "hold_seconds");
 
       FileClose(h);
@@ -215,6 +218,8 @@ public:
                    DoubleToString(m_ctx[i].atr, _Digits),
                    DoubleToString(m_ctx[i].er, 4),
                    DoubleToString(m_ctx[i].adx, 2),
+                   DoubleToString(m_ctx[i].regSlopeATR, 4),
+                   DoubleToString(m_ctx[i].regR2, 4),
                    DoubleToString(m_ctx[i].spreadPts, 1),
                    (string)dt.hour,
                    (string)dt.day_of_week,

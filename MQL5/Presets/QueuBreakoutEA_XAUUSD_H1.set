@@ -1,7 +1,8 @@
-; QueuBreakoutEA - preset de depart XAUUSD H1
+; QueuBreakoutEA - XAUUSD H1, moteur CASSURE de canal Donchian.
 ; Point de depart pour l'optimisation, PAS un reglage valide en reel.
 ; Sizing : throttle de drawdown actif, Kelly desactive (voir README).
-; Critere d'optimisation : laisser InpTester_Trials=0 pour la 1re passe.
+; 1re passe d'optimisation : laisser InpTester_Trials=0.
+InpEngine=0
 InpMagic=770101
 InpComment=QueuBrk-XAU
 InpTimeframe=16385
@@ -37,6 +38,14 @@ InpBE_LockATR=0.10
 InpUseTrailing=true
 InpTrail_ATR=2.0
 InpTrailStepPoints=20.0
+InpReg_BasePeriod=20
+InpReg_RegimeFrom=1
+InpReg_MinR2=0.35
+InpReg_MinSlopeATR=1.00
+InpReg_EntrySigma=1.00
+InpReg_StopSigma=2.50
+InpReg_RequireAboveLong=true
+InpReg_ExitOnBreak=true
 InpUseERFilter=true
 InpERPeriod=20
 InpERMin=0.30
