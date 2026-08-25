@@ -1,7 +1,8 @@
 ; QueuBreakoutEA - preset de depart BTCUSD H1
 ; Point de depart pour l'optimisation, PAS un reglage valide en reel.
-; Stops plus larges que sur l'or : le bruit intra-bougie du BTC fait
-; sortir un stop a 2 ATR beaucoup plus souvent.
+; Stops et marge de cassure elargis : le bruit intra-bougie du BTC fait
+; sortir un stop a 2 ATR beaucoup plus souvent que sur l'or.
+; Filtre de tendance en H4 : le H1 du BTC change de regime trop souvent.
 InpMagic=770102
 InpComment=QueuBrk-BTC
 InpTimeframe=16385
@@ -33,10 +34,32 @@ InpSL_ATR=2.5
 InpTP_ATR=0.0
 InpUseBreakEven=true
 InpBE_ATR=1.2
-InpBE_LockATR=0.1
+InpBE_LockATR=0.10
 InpUseTrailing=true
 InpTrail_ATR=2.5
 InpTrailStepPoints=100.0
+InpUseERFilter=true
+InpERPeriod=20
+InpERMin=0.35
+InpBreakoutATR=0.15
+InpUseDDThrottle=true
+InpDD_ThrottleStart=5.0
+InpDD_ThrottleFull=15.0
+InpDD_MinMultiple=0.25
+InpUseKelly=false
+InpKellyFraction=0.25
+InpKellyWindow=50
+InpKellyMinSamples=30
+InpKellyMinMultiple=0.25
+InpKellyMaxMultiple=3.0
+InpUsePartial=false
+InpPartial_R=1.0
+InpPartialPct=50.0
+InpWriteJournal=true
+InpTester_MinTrades=30
+InpTester_Trials=0
+InpTester_TrialsSD=0.0
+InpTester_MaxDDPct=30.0
 InpUseSession=false
 InpSessionFrom=0
 InpSessionTo=0

@@ -17,6 +17,8 @@
 #include <Trade/Trade.mqh>
 #include <Queu/Utils.mqh>
 #include <Queu/Risk.mqh>
+#include <Queu/Stats.mqh>
+#include <Queu/Journal.mqh>
 
 //+------------------------------------------------------------------+
 //| Parametres                                                        |
@@ -68,6 +70,36 @@ input bool            InpUseTrailing        = true;      // Activer le trailing 
 input double          InpTrail_ATR          = 2.0;       // Distance du trailing = ATR x
 input double          InpTrailStepPoints    = 20.0;      // Amelioration min pour deplacer le stop (points)
 
+input group "=== Qualite du signal ==="
+input bool            InpUseERFilter        = true;      // Filtre ratio d'efficience (Kaufman)
+input int             InpERPeriod           = 20;        // Periode du ratio d'efficience
+input double          InpERMin              = 0.30;      // ER minimum (0 = bruit, 1 = tendance pure)
+input double          InpBreakoutATR        = 0.10;      // Marge de cassure au-dela du canal (x ATR)
+
+input group "=== Sizing adaptatif ==="
+input bool            InpUseDDThrottle      = true;      // Reduire le risque en drawdown
+input double          InpDD_ThrottleStart   = 5.0;       // Debut de reduction (% de drawdown)
+input double          InpDD_ThrottleFull    = 15.0;      // Reduction maximale atteinte a (%)
+input double          InpDD_MinMultiple     = 0.25;      // Multiplicateur de risque au plancher
+input bool            InpUseKelly           = false;     // Kelly fractionnaire (voir README avant d'activer)
+input double          InpKellyFraction      = 0.25;      // Fraction de Kelly appliquee
+input int             InpKellyWindow        = 50;        // Fenetre glissante (trades)
+input int             InpKellyMinSamples    = 30;        // Trades requis avant activation
+input double          InpKellyMinMultiple   = 0.25;      // Borne basse (x risque de base)
+input double          InpKellyMaxMultiple   = 3.0;       // Borne haute (x risque de base)
+
+input group "=== Prise de profit partielle ==="
+input bool            InpUsePartial         = false;     // Cloturer une fraction a un multiple de R
+input double          InpPartial_R          = 1.0;       // Declenchement (multiples de R)
+input double          InpPartialPct         = 50.0;      // Fraction cloturee (%)
+
+input group "=== Mesure ==="
+input bool            InpWriteJournal       = true;      // Journal CSV des trades (dossier commun)
+input int             InpTester_MinTrades   = 30;        // Trades min pour valider une passe
+input int             InpTester_Trials      = 0;         // Passes d'optimisation (0 = deflation off)
+input double          InpTester_TrialsSD    = 0.0;       // Ecart-type des Sharpe/trade entre passes
+input double          InpTester_MaxDDPct    = 30.0;      // Drawdown au-dela duquel la passe est rejetee
+
 input group "=== Session (heure serveur) ==="
 input bool            InpUseSession         = false;     // Restreindre a une plage horaire
 input int             InpSessionFrom        = 7;         // Heure de debut
@@ -79,6 +111,8 @@ input bool            InpSkipWeekend        = false;     // Ne pas ouvrir samedi
 //+------------------------------------------------------------------+
 CTrade         g_trade;
 CQDailyGuard   g_guard;
+CQAdaptiveRisk g_arisk;
+CQJournal      g_journal;
 
 string          g_sym;
 ENUM_TIMEFRAMES g_tf;
@@ -122,6 +156,31 @@ bool ChannelBounds(double &upper, double &lower)
    upper = highs[ArrayMaximum(highs)];
    lower = lows[ArrayMinimum(lows)];
    return (upper > 0.0 && lower > 0.0);
+  }
+
+//+------------------------------------------------------------------+
+//| Identifiant de la position issue d'un deal d'ouverture.           |
+//+------------------------------------------------------------------+
+ulong PositionIdFromDeal(const ulong deal)
+  {
+   if(deal == 0 || !HistoryDealSelect(deal))
+      return 0;
+   return (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID);
+  }
+
+//+------------------------------------------------------------------+
+//| Une position portant cet identifiant est-elle encore ouverte ?    |
+//+------------------------------------------------------------------+
+bool PositionExistsById(const ulong posId)
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetTicket(i) == 0)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_IDENTIFIER) == posId)
+         return true;
+     }
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -285,15 +344,26 @@ bool OpenTrade(const bool isBuy, const double atr)
       tp = QNormalizePrice(g_sym, tp);
 
    //--- volume
-   double volume = 0.0;
+   double volume    = 0.0;
+   double riskPct   = InpRiskPercent;
+   double riskMoney = 0.0;
+
    if(InpFixedLot > 0.0)
      {
       volume = QNormalizeVolume(g_sym, InpFixedLot);
      }
    else
      {
-      double riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiskPercent / 100.0;
-      volume = QLotForRisk(g_sym, riskMoney, MathAbs(entry - sl));
+      //--- le risque de base est module par le drawdown courant et,
+      //--- si active, par le Kelly fractionnaire estime sur l'historique
+      riskPct = g_arisk.RiskPercent(InpRiskPercent,
+                                    InpUseKelly, InpKellyFraction, InpKellyMinSamples,
+                                    InpKellyMinMultiple, InpKellyMaxMultiple,
+                                    InpUseDDThrottle, InpDD_ThrottleStart,
+                                    InpDD_ThrottleFull, InpDD_MinMultiple);
+
+      riskMoney = AccountInfoDouble(ACCOUNT_EQUITY) * riskPct / 100.0;
+      volume    = QLotForRisk(g_sym, riskMoney, MathAbs(entry - sl));
      }
 
    if(volume <= 0.0)
@@ -301,14 +371,14 @@ bool OpenTrade(const bool isBuy, const double atr)
       if(!InpForceMinLot)
         {
          PrintFormat("[Queu] Trade ignore : volume calcule sous le lot minimum "
-                     "(risque %.2f%%, distance SL %.5f). Active InpForceMinLot "
+                     "(risque %.3f%%, distance SL %.5f). Active InpForceMinLot "
                      "ou augmente le risque si c'est voulu.",
-                     InpRiskPercent, MathAbs(entry - sl));
+                     riskPct, MathAbs(entry - sl));
          return false;
         }
       volume = SymbolInfoDouble(g_sym, SYMBOL_VOLUME_MIN);
-      PrintFormat("[Queu] Volume force au lot minimum %.2f : le risque reel depasse %.2f%%.",
-                  volume, InpRiskPercent);
+      PrintFormat("[Queu] Volume force au lot minimum %.2f : le risque reel depasse %.3f%%.",
+                  volume, riskPct);
      }
 
    ENUM_ORDER_TYPE type = isBuy ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
@@ -329,8 +399,45 @@ bool OpenTrade(const bool isBuy, const double atr)
       return false;
      }
 
-   PrintFormat("[Queu] %s %.2f lot @ %.5f | SL %.5f | TP %.5f | ATR %.5f",
-               isBuy ? "BUY" : "SELL", volume, g_trade.ResultPrice(), sl, tp, atr);
+   //--- contexte conserve pour le journal, le TP partiel et le sizing Kelly
+   ulong posId = PositionIdFromDeal(g_trade.ResultDeal());
+   if(posId != 0)
+     {
+      double filled = g_trade.ResultPrice();
+      if(filled <= 0.0)
+         filled = entry;
+
+      double adxVal = 0.0;
+      if(g_hADX != INVALID_HANDLE)
+         CopyOne(g_hADX, 0, 1, adxVal);
+
+      QTradeCtx ctx;
+      ctx.ticket      = posId;
+      ctx.openTime    = TimeCurrent();
+      ctx.dir         = isBuy ? 1 : -1;
+      ctx.volume      = volume;
+      ctx.entry       = filled;
+      ctx.sl          = sl;
+      ctx.tp          = tp;
+      ctx.riskPrice   = MathAbs(filled - sl);
+      ctx.atr         = atr;
+      ctx.er          = QEfficiencyRatio(g_sym, g_tf, InpERPeriod, 1);
+      ctx.adx         = adxVal;
+      ctx.spreadPts   = QSpreadPoints(g_sym);
+      ctx.mfe         = 0.0;
+      ctx.mae         = 0.0;
+      ctx.riskPct     = riskPct;
+      ctx.riskMoney   = (riskMoney > 0.0)
+                        ? riskMoney
+                        : QLossPerLot(g_sym, ctx.riskPrice) * volume;
+      ctx.pnlAccum    = 0.0;
+      ctx.partialDone = false;
+
+      g_journal.OnOpen(ctx);
+     }
+
+   PrintFormat("[Queu] %s %.2f lot @ %.5f | SL %.5f | TP %.5f | ATR %.5f | risque %.3f%%",
+               isBuy ? "BUY" : "SELL", volume, g_trade.ResultPrice(), sl, tp, atr, riskPct);
    return true;
   }
 
@@ -363,8 +470,6 @@ void ManageOpenPositions(const double atr)
   {
    if(atr <= 0.0)
       return;
-   if(!InpUseBreakEven && !InpUseTrailing)
-      return;
 
    double point   = SymbolInfoDouble(g_sym, SYMBOL_POINT);
    double minDist = QMinStopDistance(g_sym);
@@ -380,6 +485,8 @@ void ManageOpenPositions(const double atr)
       if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic)
          continue;
 
+      ulong  posId = (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
       ENUM_POSITION_TYPE type = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
       double entry     = PositionGetDouble(POSITION_PRICE_OPEN);
       double currentSL = PositionGetDouble(POSITION_SL);
@@ -391,8 +498,37 @@ void ManageOpenPositions(const double atr)
       if(market <= 0.0)
          continue;
 
+      g_journal.Track(posId, market);
+
       double profitDist = isBuy ? (market - entry) : (entry - market);
       double newSL      = currentSL;
+
+      //--- prise de profit partielle a un multiple du risque initial.
+      //--- Reduit la variance des resultats, au prix d'une esperance plus
+      //--- faible : les trades les plus rentables sont amputes.
+      if(InpUsePartial && InpPartial_R > 0.0 && !g_journal.PartialDone(posId))
+        {
+         double risk0;
+         if(g_journal.InitialRisk(posId, risk0) && profitDist >= risk0 * InpPartial_R)
+           {
+            double posVol   = PositionGetDouble(POSITION_VOLUME);
+            double closeVol = QNormalizeVolume(g_sym, posVol * InpPartialPct / 100.0);
+            double leftover = posVol - closeVol;
+
+            //--- ne pas laisser un residu sous le lot minimum, il serait
+            //--- impossible a cloturer proprement ensuite
+            if(closeVol > 0.0 && leftover >= SymbolInfoDouble(g_sym, SYMBOL_VOLUME_MIN))
+              {
+               if(g_trade.PositionClosePartial(ticket, closeVol))
+                 {
+                  g_journal.SetPartialDone(posId);
+                  PrintFormat("[Queu] Prise partielle %.2f lot a %.1f R sur #%I64u.",
+                              closeVol, InpPartial_R, ticket);
+                  continue;   // etat de la position modifie : on reprend au tick suivant
+                 }
+              }
+           }
+        }
 
       //--- break-even : on securise des que le gain couvre InpBE_ATR
       if(InpUseBreakEven && InpBE_ATR > 0.0 && profitDist >= atr * InpBE_ATR)
@@ -453,8 +589,12 @@ void EvaluateSignal(const double atr)
    if(close1 <= 0.0)
       return;
 
-   bool breakUp   = (close1 > upper);
-   bool breakDown = (close1 < lower);
+   //--- marge de cassure : exiger un depassement d'une fraction d'ATR
+   //--- ecarte les cassures marginales, qui sont majoritairement du bruit
+   double margin = atr * InpBreakoutATR;
+
+   bool breakUp   = (close1 > upper + margin);
+   bool breakDown = (close1 < lower - margin);
 
    if(!breakUp && !breakDown)
       return;
@@ -485,6 +625,18 @@ void EvaluateSignal(const double atr)
         }
      }
 
+   //--- ratio d'efficience : mesure directement le rapport signal/bruit
+   //--- du chemin parcouru, la ou l'ADX ne mesure qu'une moyenne lissee
+   if(InpUseERFilter)
+     {
+      double er = QEfficiencyRatio(g_sym, g_tf, InpERPeriod, 1);
+      if(er < InpERMin)
+        {
+         g_blockReason = StringFormat("ratio d'efficience %.2f < %.2f", er, InpERMin);
+         return;
+        }
+     }
+
    if(!EntryAllowed(atr))
       return;
 
@@ -504,15 +656,37 @@ void UpdatePanel(const double atr)
       return;
 
    double point = SymbolInfoDouble(g_sym, SYMBOL_POINT);
+   double er    = InpUseERFilter ? QEfficiencyRatio(g_sym, g_tf, InpERPeriod, 1) : 0.0;
+
+   //--- sizing courant, affiche avant meme le prochain trade
+   double riskNow = g_arisk.RiskPercent(InpRiskPercent,
+                                        InpUseKelly, InpKellyFraction, InpKellyMinSamples,
+                                        InpKellyMinMultiple, InpKellyMaxMultiple,
+                                        InpUseDDThrottle, InpDD_ThrottleStart,
+                                        InpDD_ThrottleFull, InpDD_MinMultiple);
+
+   string kelly = "off";
+   if(InpUseKelly)
+     {
+      double kp, kb, kf;
+      if(g_arisk.Count() < InpKellyMinSamples)
+         kelly = StringFormat("echantillon %d/%d", g_arisk.Count(), InpKellyMinSamples);
+      else
+         if(g_arisk.KellyStats(kp, kb, kf))
+            kelly = StringFormat("p=%.2f b=%.2f f*=%+.3f", kp, kb, kf);
+     }
+
    string txt = StringFormat(
                    "QueuBreakoutEA  |  %s %s\n"
-                   "ATR: %.5f (%.0f pts)   Spread: %.0f pts\n"
+                   "ATR: %.5f (%.0f pts)   Spread: %.0f pts   ER: %.2f\n"
                    "Positions EA: %d / %d\n"
+                   "Risque prochain trade: %.3f%%  (base %.2f%%)   Kelly: %s\n"
                    "Equity debut de journee: %.2f   Equity: %.2f\n"
                    "Etat: %s",
                    g_sym, EnumToString(g_tf),
-                   atr, (point > 0.0 ? atr / point : 0.0), QSpreadPoints(g_sym),
+                   atr, (point > 0.0 ? atr / point : 0.0), QSpreadPoints(g_sym), er,
                    CountOwnPositions(), InpMaxPositions,
+                   riskNow, InpRiskPercent, kelly,
                    g_guard.EquityAtOpen(), AccountInfoDouble(ACCOUNT_EQUITY),
                    (g_blockReason == "" ? "actif" : g_blockReason));
 
@@ -559,6 +733,33 @@ int OnInit(void)
       Print("[Queu] InpMaxPositions doit valoir au moins 1.");
       return INIT_PARAMETERS_INCORRECT;
      }
+   if(InpUseERFilter && (InpERPeriod < 2 || InpERMin < 0.0 || InpERMin > 1.0))
+     {
+      Print("[Queu] InpERPeriod >= 2 et InpERMin dans [0, 1] sont requis.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpUseDDThrottle && InpDD_ThrottleFull <= InpDD_ThrottleStart)
+     {
+      Print("[Queu] InpDD_ThrottleFull doit etre superieur a InpDD_ThrottleStart.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpUseKelly && (InpKellyFraction <= 0.0 || InpKellyFraction > 1.0))
+     {
+      Print("[Queu] InpKellyFraction doit etre dans ]0, 1]. Le plein Kelly (1.0) "
+            "est deja tres agressif : 0.25 est le reglage usuel.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpUseKelly && InpKellyMinSamples > InpKellyWindow)
+     {
+      Print("[Queu] InpKellyMinSamples ne peut pas depasser InpKellyWindow : "
+            "le seuil ne serait jamais atteint.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+   if(InpUsePartial && (InpPartialPct <= 0.0 || InpPartialPct >= 100.0))
+     {
+      Print("[Queu] InpPartialPct doit etre dans ]0, 100[.");
+      return INIT_PARAMETERS_INCORRECT;
+     }
 
    //--- indicateurs
    g_hATR = iATR(g_sym, g_tf, InpATRPeriod);
@@ -596,6 +797,12 @@ int OnInit(void)
    g_trade.SetAsyncMode(false);
 
    g_guard.Refresh(TimeCurrent());
+   g_arisk.Init(InpKellyWindow);
+
+   //--- en optimisation, des dizaines d'agents ecriraient dans le meme
+   //--- fichier : le journal detaille n'a de sens que hors optimisation
+   bool writeJournal = InpWriteJournal && !MQLInfoInteger(MQL_OPTIMIZATION);
+   g_journal.Init(StringFormat("Queu_Trades_%s_%I64u.csv", g_sym, InpMagic), writeJournal);
 
    //--- amorce le detecteur : pas d'entree sur la bougie deja en cours
    //--- au moment ou l'EA est attache
@@ -644,14 +851,12 @@ void OnTick(void)
   }
 
 //+------------------------------------------------------------------+
-//| Detecte les cloture perdantes pour declencher la pause.           |
+//| Comptabilise les clotures : journal, sizing adaptatif, cooldown.  |
 //+------------------------------------------------------------------+
 void OnTradeTransaction(const MqlTradeTransaction &trans,
                         const MqlTradeRequest     &request,
                         const MqlTradeResult      &result)
   {
-   if(InpCooldownBars <= 0)
-      return;
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
       return;
    if(!HistoryDealSelect(trans.deal))
@@ -664,14 +869,231 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(trans.deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
       return;
 
+   ulong    posId = (ulong)HistoryDealGetInteger(trans.deal, DEAL_POSITION_ID);
+   double   price = HistoryDealGetDouble(trans.deal, DEAL_PRICE);
+   datetime when  = (datetime)HistoryDealGetInteger(trans.deal, DEAL_TIME);
+
    double pnl = HistoryDealGetDouble(trans.deal, DEAL_PROFIT)
               + HistoryDealGetDouble(trans.deal, DEAL_SWAP)
               + HistoryDealGetDouble(trans.deal, DEAL_COMMISSION);
 
-   if(pnl >= 0.0)
+   g_journal.AddPnL(posId, pnl);
+
+   //--- une cloture partielle laisse la position ouverte : on n'arrete pas
+   //--- le compteur de R tant que le trade n'est pas termine
+   bool   closedOut = !PositionExistsById(posId);
+   double r         = 0.0;
+   bool   haveR     = g_journal.RealizedR(posId, r);
+
+   if(closedOut && haveR)
+      g_arisk.PushR(r);
+
+   g_journal.OnClose(posId, when, price, pnl, closedOut);
+
+   if(closedOut && haveR && r < 0.0 && InpCooldownBars > 0)
+     {
+      g_cooldownEnd = TimeCurrent() + (datetime)(InpCooldownBars * PeriodSeconds(g_tf));
+      PrintFormat("[Queu] Trade perdant cloture (%.2f R). Pause jusqu'a %s.",
+                  r, TimeToString(g_cooldownEnd, TIME_DATE | TIME_MINUTES));
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Colonnes du resume de passe, partagees entre agent et terminal.   |
+//+------------------------------------------------------------------+
+#define QUEU_STAT_COLS 17
+
+string QueuTesterHeader(void)
+  {
+   return "n_trades,sharpe_per_trade,sortino,max_dd_pct,psr_vs_zero,dsr,"
+          "net_profit,profit_factor,mean_return_pct,"
+          "channel_period,atr_period,sl_atr,trail_atr,"
+          "breakout_atr,er_min,adx_min,risk_pct";
+  }
+
+//+------------------------------------------------------------------+
+//| Ecrit une ligne de resume dans le fichier commun.                 |
+//+------------------------------------------------------------------+
+void QueuWriteTesterRow(const double &st[])
+  {
+   if(ArraySize(st) < QUEU_STAT_COLS)
       return;
 
-   g_cooldownEnd = TimeCurrent() + (datetime)(InpCooldownBars * PeriodSeconds(g_tf));
-   PrintFormat("[Queu] Cloture perdante (%.2f). Pause jusqu'a %s.",
-               pnl, TimeToString(g_cooldownEnd, TIME_DATE | TIME_MINUTES));
+   string file = StringFormat("Queu_Passes_%s.csv", _Symbol);
+
+   //--- plusieurs processus peuvent viser le fichier : quelques essais
+   for(int attempt = 0; attempt < 5; attempt++)
+     {
+      int h = FileOpen(file, FILE_READ | FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ',');
+      if(h == INVALID_HANDLE)
+         continue;
+
+      if(FileSize(h) == 0)
+         FileWrite(h, QueuTesterHeader());
+
+      FileSeek(h, 0, SEEK_END);
+      FileWrite(h,
+                DoubleToString(st[0],  0), DoubleToString(st[1],  6),
+                DoubleToString(st[2],  6), DoubleToString(st[3],  3),
+                DoubleToString(st[4],  6), DoubleToString(st[5],  6),
+                DoubleToString(st[6],  2), DoubleToString(st[7],  4),
+                DoubleToString(st[8],  6),
+                DoubleToString(st[9],  0), DoubleToString(st[10], 0),
+                DoubleToString(st[11], 3), DoubleToString(st[12], 3),
+                DoubleToString(st[13], 3), DoubleToString(st[14], 3),
+                DoubleToString(st[15], 2), DoubleToString(st[16], 4));
+      FileClose(h);
+      return;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Critere d'optimisation personnalise.                              |
+//|                                                                   |
+//| MT5 propose par defaut le profit ou le facteur de recuperation.   |
+//| Optimiser sur ces criteres selectionne presque toujours du        |
+//| sur-apprentissage : ils ne tiennent compte ni de la taille de     |
+//| l'echantillon, ni de la forme de la distribution, ni du nombre    |
+//| de jeux de parametres essayes.                                    |
+//|                                                                   |
+//| On retourne ici le Deflated Sharpe Ratio : la probabilite que la  |
+//| performance observee ne soit PAS le meilleur tirage d'une serie   |
+//| de tests sur du bruit. Une passe est rejetee d'office si elle     |
+//| repose sur trop peu de trades ou si son drawdown depasse la       |
+//| tolerance.                                                        |
+//+------------------------------------------------------------------+
+double OnTester(void)
+  {
+   if(!HistorySelect(0, TimeCurrent()))
+      return 0.0;
+
+   double rets[];
+   ArrayResize(rets, 0);
+
+   double balance = TesterStatistics(STAT_INITIAL_DEPOSIT);
+   if(balance <= 0.0)
+      balance = AccountInfoDouble(ACCOUNT_BALANCE);   // repli si non renseigne
+   if(balance <= 0.0)
+      return 0.0;                                     // rien de normalisable
+   double grossProfit = 0.0;
+   double grossLoss   = 0.0;
+   double netProfit   = 0.0;
+
+   int total = HistoryDealsTotal();
+   for(int i = 0; i < total; i++)
+     {
+      ulong deal = HistoryDealGetTicket(i);
+      if(deal == 0)
+         continue;
+      if((ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) != InpMagic)
+         continue;
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol)
+         continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+         continue;
+
+      double pnl = HistoryDealGetDouble(deal, DEAL_PROFIT)
+                 + HistoryDealGetDouble(deal, DEAL_SWAP)
+                 + HistoryDealGetDouble(deal, DEAL_COMMISSION);
+
+      //--- rendement rapporte au capital DISPONIBLE avant le trade :
+      //--- c'est ce qui rend la serie coherente avec une composition
+      if(balance > 0.0)
+        {
+         int n = ArraySize(rets);
+         ArrayResize(rets, n + 1);
+         rets[n] = pnl / balance;
+        }
+
+      balance   += pnl;
+      netProfit += pnl;
+
+      if(pnl >= 0.0)
+         grossProfit += pnl;
+      else
+         grossLoss += -pnl;
+     }
+
+   int n = ArraySize(rets);
+   if(n < InpTester_MinTrades)
+      return 0.0;                         // echantillon insuffisant : non evaluable
+
+   double maxDD = QMaxDrawdownFromReturns(rets) * 100.0;
+   if(InpTester_MaxDDPct > 0.0 && maxDD > InpTester_MaxDDPct)
+      return 0.0;                         // hors tolerance de risque
+
+   double sharpe  = QSharpe(rets);
+   double sortino = QSortino(rets, 0.0);
+   double psr0    = QProbabilisticSharpe(rets, 0.0);
+   double dsr     = QDeflatedSharpe(rets, InpTester_Trials, InpTester_TrialsSD);
+
+   double mean = 0.0;
+   for(int i = 0; i < n; i++)
+      mean += rets[i];
+   mean = (mean / n) * 100.0;
+
+   double pf = (grossLoss > 0.0) ? grossProfit / grossLoss : 0.0;
+
+   double st[QUEU_STAT_COLS];
+   st[0]  = (double)n;
+   st[1]  = sharpe;
+   st[2]  = sortino;
+   st[3]  = maxDD;
+   st[4]  = psr0;
+   st[5]  = dsr;
+   st[6]  = netProfit;
+   st[7]  = pf;
+   st[8]  = mean;
+   st[9]  = (double)InpChannelPeriod;
+   st[10] = (double)InpATRPeriod;
+   st[11] = InpSL_ATR;
+   st[12] = InpTrail_ATR;
+   st[13] = InpBreakoutATR;
+   st[14] = InpERMin;
+   st[15] = InpADXMin;
+   st[16] = InpRiskPercent;
+
+   if(MQLInfoInteger(MQL_OPTIMIZATION))
+      FrameAdd("queu", 0, dsr, st);       // collecte centralisee par le terminal
+   else
+      QueuWriteTesterRow(st);             // backtest unique : ecriture directe
+
+   return dsr;
+  }
+
+//+------------------------------------------------------------------+
+//| Optimisation : prepare le fichier de collecte des passes.         |
+//+------------------------------------------------------------------+
+int OnTesterInit(void)
+  {
+   PrintFormat("[Queu] Optimisation demarree. Resume des passes : Queu_Passes_%s.csv "
+               "(dossier commun des terminaux).", _Symbol);
+   return INIT_SUCCEEDED;
+  }
+
+//+------------------------------------------------------------------+
+//| Une passe s'est terminee : le terminal recupere sa trame.         |
+//| Ecrire ici plutot que dans l'agent evite que des dizaines de      |
+//| processus se disputent le meme fichier.                           |
+//+------------------------------------------------------------------+
+void OnTesterPass(void)
+  {
+   ulong  pass;
+   string name;
+   ulong  id;
+   double value;
+   double data[];
+
+   while(FrameNext(pass, name, id, value, data))
+      if(name == "queu")
+         QueuWriteTesterRow(data);
+  }
+
+//+------------------------------------------------------------------+
+//| Fin d'optimisation.                                               |
+//+------------------------------------------------------------------+
+void OnTesterDeinit(void)
+  {
+   PrintFormat("[Queu] Optimisation terminee. Analyse : "
+               "python3 tools/analyze_queu.py passes Queu_Passes_%s.csv", _Symbol);
   }

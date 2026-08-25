@@ -73,7 +73,7 @@ double QMinStopDistance(const string sym)
   {
    long stops  = SymbolInfoInteger(sym, SYMBOL_TRADE_STOPS_LEVEL);
    long freeze = SymbolInfoInteger(sym, SYMBOL_TRADE_FREEZE_LEVEL);
-   long lvl    = MathMax(stops, freeze);
+   long lvl    = (long)MathMax((double)stops, (double)freeze);
    return (double)lvl * SymbolInfoDouble(sym, SYMBOL_POINT);
   }
 

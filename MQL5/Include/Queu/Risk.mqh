@@ -105,4 +105,164 @@ public:
    double            EquityAtOpen() const { return m_equityAtOpen; }
   };
 
+//+------------------------------------------------------------------+
+//| Sizing adaptatif.                                                 |
+//|                                                                   |
+//| Deux mecanismes distincts, tous deux orientes vers la croissance  |
+//| geometrique du capital plutot que vers l'esperance par trade :    |
+//|                                                                   |
+//| 1. Kelly fractionnaire estime sur une fenetre glissante de        |
+//|    resultats en R. Dans ce montage, la fraction de Kelly est      |
+//|    DIRECTEMENT le pourcentage d'equity a risquer : un trade perd  |
+//|    exactement le montant risque quand le stop est touche, ce qui  |
+//|    est l'hypothese du pari de Kelly.                              |
+//|      f* = p - (1 - p) / b,  b = gain moyen / perte moyenne en R   |
+//|    Le plein Kelly est inexploitable en pratique : p et b sont     |
+//|    estimes, et une surestimation mene a la ruine. On applique     |
+//|    donc une fraction (0.25 par defaut) et un plafond dur.         |
+//|                                                                   |
+//| 2. Throttle de drawdown : reduction lineaire du risque quand      |
+//|    l'equity decroche de son plus haut. Reduit la profondeur des   |
+//|    creux, au prix d'une reprise plus lente.                       |
+//+------------------------------------------------------------------+
+class CQAdaptiveRisk
+  {
+private:
+   double            m_r[];          // resultats recents, en multiples de R
+   int               m_window;
+   double            m_peakEquity;
+
+public:
+                     CQAdaptiveRisk(): m_window(50), m_peakEquity(0.0) {}
+
+   void              Init(const int window)
+     {
+      m_window = (int)MathMax(2.0, (double)window);
+      ArrayResize(m_r, 0);
+      m_peakEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+     }
+
+   int               Count(void) const { return ArraySize(m_r); }
+
+   //--- empile un resultat ; la fenetre glisse par la gauche
+   void              PushR(const double r)
+     {
+      int n = ArraySize(m_r);
+      if(n < m_window)
+        {
+         ArrayResize(m_r, n + 1);
+         m_r[n] = r;
+         return;
+        }
+
+      for(int i = 0; i < n - 1; i++)
+         m_r[i] = m_r[i + 1];
+      m_r[n - 1] = r;
+     }
+
+   //--- p = taux de reussite, b = ratio gain/perte moyens, f = Kelly plein
+   bool              KellyStats(double &p, double &b, double &f) const
+     {
+      p = b = f = 0.0;
+
+      int n = ArraySize(m_r);
+      if(n < 2)
+         return false;
+
+      double sumWin = 0.0, sumLoss = 0.0;
+      int    nWin = 0, nLoss = 0;
+
+      for(int i = 0; i < n; i++)
+        {
+         if(m_r[i] > 0.0)
+           {
+            sumWin += m_r[i];
+            nWin++;
+           }
+         else
+           {
+            sumLoss += MathAbs(m_r[i]);
+            nLoss++;
+           }
+        }
+
+      if(nWin == 0 || nLoss == 0)
+         return false;                  // pas de quoi estimer un ratio
+
+      double avgWin  = sumWin / nWin;
+      double avgLoss = sumLoss / nLoss;
+      if(avgLoss <= 0.0)
+         return false;
+
+      p = (double)nWin / (double)n;
+      b = avgWin / avgLoss;
+      f = p - (1.0 - p) / b;
+
+      return true;
+     }
+
+   //--- multiplicateur de risque lie au drawdown courant
+   double            DrawdownMultiplier(const double ddStartPct, const double ddFullPct,
+                                        const double minMultiple)
+     {
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(equity > m_peakEquity)
+         m_peakEquity = equity;
+
+      if(m_peakEquity <= 0.0 || ddStartPct <= 0.0 || ddFullPct <= ddStartPct)
+         return 1.0;
+
+      double ddPct = (m_peakEquity - equity) / m_peakEquity * 100.0;
+
+      if(ddPct <= ddStartPct)
+         return 1.0;
+      if(ddPct >= ddFullPct)
+         return minMultiple;
+
+      //--- interpolation lineaire entre les deux seuils
+      double t = (ddPct - ddStartPct) / (ddFullPct - ddStartPct);
+      return 1.0 - t * (1.0 - minMultiple);
+     }
+
+   //--- pourcentage d'equity a risquer sur le prochain trade
+   double            RiskPercent(const double basePct,
+                                 const bool   useKelly,
+                                 const double kellyFraction,
+                                 const int    minSamples,
+                                 const double minMultiple,
+                                 const double maxMultiple,
+                                 const bool   useDDThrottle,
+                                 const double ddStartPct,
+                                 const double ddFullPct,
+                                 const double ddMinMultiple)
+     {
+      double risk = basePct;
+
+      if(useKelly && Count() >= minSamples)
+        {
+         double p, b, f;
+         if(KellyStats(p, b, f))
+           {
+            if(f <= 0.0)
+              {
+               //--- l'edge recent est nul ou negatif : on ne coupe pas le
+               //--- trading (l'echantillon est court) mais on reduit au plancher
+               risk = basePct * minMultiple;
+              }
+            else
+              {
+               risk = 100.0 * kellyFraction * f;
+               risk = MathMax(basePct * minMultiple,
+                              MathMin(basePct * maxMultiple, risk));
+              }
+           }
+        }
+
+      if(useDDThrottle)
+         risk *= DrawdownMultiplier(ddStartPct, ddFullPct, ddMinMultiple);
+
+      return MathMax(0.0, risk);
+     }
+  };
+
 #endif // QUEU_RISK_MQH

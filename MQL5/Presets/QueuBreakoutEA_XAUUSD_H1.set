@@ -1,7 +1,7 @@
 ; QueuBreakoutEA - preset de depart XAUUSD H1
 ; Point de depart pour l'optimisation, PAS un reglage valide en reel.
-; A charger dans le testeur de strategie via "Charger" puis a re-optimiser
-; sur les donnees de TON broker (le spread et le point de l'or varient beaucoup).
+; Sizing : throttle de drawdown actif, Kelly desactive (voir README).
+; Critere d'optimisation : laisser InpTester_Trials=0 pour la 1re passe.
 InpMagic=770101
 InpComment=QueuBrk-XAU
 InpTimeframe=16385
@@ -33,10 +33,32 @@ InpSL_ATR=2.0
 InpTP_ATR=0.0
 InpUseBreakEven=true
 InpBE_ATR=1.0
-InpBE_LockATR=0.1
+InpBE_LockATR=0.10
 InpUseTrailing=true
 InpTrail_ATR=2.0
 InpTrailStepPoints=20.0
+InpUseERFilter=true
+InpERPeriod=20
+InpERMin=0.30
+InpBreakoutATR=0.10
+InpUseDDThrottle=true
+InpDD_ThrottleStart=5.0
+InpDD_ThrottleFull=15.0
+InpDD_MinMultiple=0.25
+InpUseKelly=false
+InpKellyFraction=0.25
+InpKellyWindow=50
+InpKellyMinSamples=30
+InpKellyMinMultiple=0.25
+InpKellyMaxMultiple=3.0
+InpUsePartial=false
+InpPartial_R=1.0
+InpPartialPct=50.0
+InpWriteJournal=true
+InpTester_MinTrades=30
+InpTester_Trials=0
+InpTester_TrialsSD=0.0
+InpTester_MaxDDPct=30.0
 InpUseSession=true
 InpSessionFrom=7
 InpSessionTo=20
