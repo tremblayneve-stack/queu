@@ -228,6 +228,77 @@ int QRegChainBias(const QRegChain &chain, const int from,
   }
 
 //+------------------------------------------------------------------+
+//| Modes de confirmation multi-horizon pour le retour a la moyenne.  |
+//|                                                                   |
+//| Le principe commun : on entre a CONTRE-tendance sur l'horizon      |
+//| rapide (on achete le bas du canal) mais seulement DANS LE SENS de |
+//| la tendance des horizons lents. Ce qui change d'un mode a l'autre, |
+//| c'est la severite avec laquelle les horizons lents doivent         |
+//| s'accorder, et donc l'arbitrage entre nombre de signaux et taux    |
+//| de faux signaux.                                                   |
+//+------------------------------------------------------------------+
+enum ENUM_QMR_CONFIRM
+  {
+   QMR_CONFIRM_SIGN     = 0,  // Accord de signe des pentes lentes
+   QMR_CONFIRM_SIGN_R2  = 1,  // Accord de signe + R2 minimal sur chaque
+   QMR_CONFIRM_VOTE     = 2,  // Vote pondere par le R2 (accord partiel tolere)
+   QMR_CONFIRM_POSITION = 3,  // Accord de signe + place restante dans le canal lent
+   QMR_CONFIRM_SLOPE    = 4   // Accord de signe + amplitude minimale de la pente
+  };
+
+//+------------------------------------------------------------------+
+//| Position du prix dans un canal, 0 = bande basse, 1 = bande haute. |
+//| Sert a savoir s'il reste de la place avant la bande opposee.      |
+//+------------------------------------------------------------------+
+double QRegPositionInChannel(const QRegResult &r, const double close,
+                             const double mult, const ENUM_QREG_DEV mode)
+  {
+   if(!r.valid)
+      return 0.5;
+
+   double band = QRegDev(r, mode) * mult;
+   if(band <= 0.0)
+      return 0.5;
+
+   double lower = r.value - band;
+   double pos   = (close - lower) / (2.0 * band);
+
+   if(pos < 0.0)
+      pos = 0.0;
+   if(pos > 1.0)
+      pos = 1.0;
+
+   return pos;
+  }
+
+//+------------------------------------------------------------------+
+//| Taux de reussite minimal d'un retour a la moyenne, compte tenu du |
+//| cout. Geometrie : entree a D dev sous la droite, cible a T dev    |
+//| au-dessus, stop a S dev sous la droite.                           |
+//|                                                                   |
+//|   gain net   = (D + T) * dev - cout                               |
+//|   perte nette = (S - D) * dev + cout                              |
+//|   p*         = perte / (gain + perte)                             |
+//|                                                                   |
+//| Retourne 1.0 quand la cible ne couvre meme pas le cout : le trade |
+//| est alors perdant par construction, quel que soit le signal.      |
+//+------------------------------------------------------------------+
+double QRegBreakevenRate(const double dev, const double cost,
+                         const double D, const double S, const double T)
+  {
+   if(dev <= 0.0 || S <= D)
+      return 1.0;
+
+   double win  = (D + T) * dev - cost;
+   double loss = (S - D) * dev + cost;
+
+   if(win <= 0.0 || loss <= 0.0)
+      return 1.0;
+
+   return loss / (win + loss);
+  }
+
+//+------------------------------------------------------------------+
 //| Dispersion selon le mode choisi.                                  |
 //+------------------------------------------------------------------+
 double QRegDev(const QRegResult &r, const ENUM_QREG_DEV mode)

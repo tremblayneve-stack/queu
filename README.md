@@ -18,6 +18,7 @@ décider s'il a réellement un edge.
 - [Deux moteurs d'entrée](#deux-moteurs-dentrée)
 - [Moteur 1 — cassure de canal](#moteur-1--cassure-de-canal)
 - [Moteur 2 — chaîne de régressions linéaires](#moteur-2--chaîne-de-régressions-linéaires)
+- [Moteur 3 — retour à la moyenne multi-horizon](#moteur-3--retour-à-la-moyenne-multi-horizon)
 - [Ce qui améliore réellement le rendement](#ce-qui-améliore-réellement-le-rendement)
   - [1. Le critère d'optimisation (levier principal)](#1-le-critère-doptimisation-levier-principal)
   - [2. Le sizing adaptatif](#2-le-sizing-adaptatif)
@@ -42,6 +43,7 @@ d'optimisation — seule la condition d'entrée diffère.
 | `QUEU_ENGINE_BREAKOUT` | la **cassure** du canal Donchian | ATR |
 | `QUEU_ENGINE_REGRESSION` | le **repli** dans une tendance établie | σ des résidus |
 | `QUEU_ENGINE_BOTH` | les deux, premier signal servi | selon le moteur |
+| `QUEU_ENGINE_MEANREV` | le **bas du canal** rapide, dans le sens des horizons lents | dev du canal |
 
 Ce ne sont pas deux variantes du même signal : l'un entre quand le prix
 s'échappe, l'autre quand il revient. **Ils ne se déclenchent pas aux mêmes
@@ -218,6 +220,88 @@ données (tendance pure, tendance bruitée, série plate, baissière, échelle B
 échelle or). L'identité de forme fermée `Sxx = n(n²−1)/12` est exacte jusqu'à
 n = 321, et les cas limites (série constante, droite parfaite) ne produisent ni
 division par zéro ni R² hors de [0, 1].
+
+---
+
+## Moteur 3 — retour à la moyenne multi-horizon
+
+Acheter le bas du canal M1 / vendre le haut, mais **uniquement dans le sens des
+horizons lents** (M3, M5). Contre-tendance sur le bruit, dans le sens du régime.
+
+### D'abord le coût, parce qu'à M1 c'est lui qui décide
+
+Avant toute question de signal, il y a une contrainte purement arithmétique.
+En notant `r = coût / dev` (spread + commissions rapportés à **une déviation du
+canal**), avec une entrée à `D` dev sous la droite, un stop à `S` dev et une
+cible à `T` dev au-delà de la droite :
+
+```
+gain net    = (D + T)·dev − coût
+perte nette = (S − D)·dev + coût
+p*          = perte / (gain + perte)
+```
+
+`tools/meanrev_breakeven.py` tabule ça. Le coût maximal absorbable pour rester
+sous 60 % de taux de réussite requis :
+
+| Géométrie | coût/dev max |
+|---|---|
+| D=1,5 · S=2,5 · cible sur la droite | 0,50 |
+| D=2,0 · S=3,0 · cible sur la droite | 0,80 |
+| D=2,0 · S=2,5 · cible sur la droite | 1,00 |
+| **D=2,0 · S=3,0 · cible +1 dev** | **1,40** |
+
+Trois enseignements, par ordre d'importance :
+
+1. **Viser au-delà de la droite est le plus gros levier** — 0,80 → 1,40, presque
+   le double de coût absorbable. C'est pourquoi `InpMR_TargetDev` vaut 0,5 par
+   défaut et non 0.
+2. **Entrer profond compte plus qu'entrer tôt** — à 1,5 dev la tolérance tombe à
+   0,50. Une entrée précoce attrape plus de signaux mais paie proportionnellement
+   bien plus cher.
+3. **Le stop serré aide autant que l'entrée profonde**, à condition qu'il ne se
+   fasse pas balayer — ce que ce calcul ne dit pas : il fixe le seuil, pas la
+   fréquence.
+
+L'EA calcule `p*` **en direct** à partir du spread courant et de la largeur du
+canal, et refuse le trade si `p*` dépasse `InpMR_MaxBreakeven`. C'est le filtre
+de coût qui compte à cette échelle — et c'est pourquoi les presets M1
+**désactivent** `InpMaxSpreadATRRatio` : à M1 l'ATR est trop petit pour que ce
+ratio ait un sens.
+
+### Les cinq modes de confirmation
+
+`InpMR_Confirm` — c'est **la** question ouverte de ce setup, donc c'est un
+paramètre à optimiser (valeurs 0 à 4), pas à choisir d'avance.
+
+| Mode | Règle | Arbitrage |
+|---|---|---|
+| `SIGN` (0) | Les deux pentes lentes de même signe | Le plus permissif. Ton idée littérale. Un régime quasi plat passe le filtre. |
+| `SIGN_R2` (1) | + R² minimal sur **chaque** horizon | Écarte les régimes lents mal définis. **Défaut.** |
+| `VOTE` (2) | Score `Σ signe·R²`, seuil sur \|score\| | Tolère un désaccord si l'horizon dissident est de mauvaise qualité. Plus de signaux. |
+| `POSITION` (3) | + le prix doit être dans la moitié basse du canal lent (pour un achat) | Évite d'acheter un repli qui part du **haut** du canal lent, où il reste peu de place avant la bande opposée. |
+| `SLOPE` (4) | + pente normalisée minimale (ATR/fenêtre) | Un signe de pente ne dit rien de l'amplitude. Le plus sélectif. |
+
+Deux choix **orthogonaux**, testables indépendamment :
+
+- **`InpMR_RequireOpposite`** — exiger que le canal rapide soit de couleur
+  opposée (rouge dans un M3/M5 vert). C'est ta formulation exacte. La désactiver
+  donne un setup plus simple : « touche de bande basse dans une tendance
+  haussière », sans exiger que le repli soit déjà installé. Plus de signaux,
+  potentiellement plus tôt — à mesurer.
+- **`InpMR_UseNested`** — remplacer les deux timeframes par deux **longueurs**
+  sur la TF de travail. Une régression de 50 bougies en M5 et une de 250 bougies
+  en M1 couvrent toutes deux **250 minutes** : les deux modes visent le même
+  horizon. La différence est la matière — le M5 agrège en OHLC (moins de bruit,
+  moins de points), le M1 garde toutes les clôtures (statistique plus fine, bruit
+  plus présent). Aucun n'est supérieur *a priori*, mais le mode imbriqué évite
+  les questions de synchronisation de barres entre timeframes.
+
+### Sorties
+
+La cible est **fixe** (`mid + T·dev`). Trailing et break-even sont désactivés
+dans les presets M1 : déplacer le stop rogne le gain sans rallonger la cible.
+L'EA émet un avertissement au démarrage s'ils sont laissés actifs.
 
 ---
 
@@ -414,6 +498,8 @@ L'outil affiche les deux valeurs exactes à recopier.
 | `QueuRegression_XAUUSD_H1.set` | XAUUSD H1 | **Régression.** N=20, R² ≥ 0,35, repli 1,0 σ, stop 2,5 σ, magic 770103 |
 | `QueuRegression_BTCUSD_H1.set` | BTCUSD H1 | **Régression.** N=24, R² ≥ 0,30, repli 1,2 σ, stop 3,0 σ, magic 770104 |
 | `QueuRegression_XAUUSD_PineParity.set` | XAUUSD H1 | **Parité TradingView.** Mode PINE, échelons 25/50/100/200, `devlen`=2, magic 770105 |
+| `QueuMeanRev_XAUUSD_M1.set` | XAUUSD **M1** | **Retour à la moyenne.** M3/M5, D=2 S=3 T=+0,5, `p*` max 60 %, magic 770106 |
+| `QueuMeanRev_BTCUSD_M1.set` | BTCUSD **M1** | **Retour à la moyenne.** N=60, mêmes seuils, week-end exclu, magic 770107 |
 
 Les magic numbers des presets de régression sont distincts : les deux moteurs
 peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.

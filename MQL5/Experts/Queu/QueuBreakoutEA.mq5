@@ -33,7 +33,8 @@ enum ENUM_QUEU_ENGINE
   {
    QUEU_ENGINE_BREAKOUT   = 0,   // Cassure de canal Donchian
    QUEU_ENGINE_REGRESSION = 1,   // Chaine de regressions : repli en tendance
-   QUEU_ENGINE_BOTH       = 2    // Les deux (premier signal servi)
+   QUEU_ENGINE_BOTH       = 2,   // Cassure + regression (premier signal servi)
+   QUEU_ENGINE_MEANREV    = 3    // Retour a la moyenne en canal, confirme multi-horizon
   };
 
 input group "=== General ==="
@@ -83,6 +84,23 @@ input double          InpBE_LockATR         = 0.10;      // Verrouille ATR x au-
 input bool            InpUseTrailing        = true;      // Activer le trailing stop
 input double          InpTrail_ATR          = 2.0;       // Distance du trailing = ATR x
 input double          InpTrailStepPoints    = 20.0;      // Amelioration min pour deplacer le stop (points)
+
+input group "=== Retour a la moyenne en canal (multi-horizon) ==="
+input int             InpMR_Period          = 50;        // Longueur de regression (toutes echelles)
+input double          InpMR_EntryDev        = 2.00;      // D : entree a D dev de la droite
+input double          InpMR_StopDev         = 3.00;      // S : stop a S dev de la droite
+input double          InpMR_TargetDev       = 0.50;      // T : cible a T dev AU-DELA de la droite
+input ENUM_QMR_CONFIRM InpMR_Confirm        = QMR_CONFIRM_SIGN_R2; // Mode de confirmation lente
+input bool            InpMR_UseNested       = false;     // Horizons lents par longueurs, pas par TF
+input ENUM_TIMEFRAMES InpMR_TF1             = PERIOD_M3; // Horizon lent 1
+input ENUM_TIMEFRAMES InpMR_TF2             = PERIOD_M5; // Horizon lent 2
+input bool            InpMR_RequireOpposite = true;      // Exiger le canal rapide de couleur opposee
+input double          InpMR_ConfirmMinR2    = 0.25;      // R2 min des horizons lents (modes 1 et 2)
+input double          InpMR_VoteThreshold   = 0.40;      // Seuil du vote pondere (mode 2)
+input double          InpMR_MaxPosInChannel = 0.50;      // Place restante max dans le canal lent (mode 3)
+input double          InpMR_ConfirmMinSlope = 0.50;      // Pente min des horizons lents, ATR/fenetre (mode 4)
+input double          InpMR_MaxBreakeven    = 60.0;      // Refus si le p* requis depasse ce %
+input double          InpMR_CostPoints      = 0.0;       // Cout aller-retour additionnel (points)
 
 input group "=== Chaine de regressions lineaires ==="
 input int             InpReg_BasePeriod     = 20;        // Echelon court N (les autres : 2N, 4N, 8N)
@@ -149,6 +167,8 @@ int      g_hATR      = INVALID_HANDLE;
 int      g_hEmaFast  = INVALID_HANDLE;
 int      g_hEmaSlow  = INVALID_HANDLE;
 int      g_hADX      = INVALID_HANDLE;
+int      g_hATR_TF1  = INVALID_HANDLE;   // ATR des horizons lents, pour normaliser
+int      g_hATR_TF2  = INVALID_HANDLE;   // les pentes du mode QMR_CONFIRM_SLOPE
 
 datetime g_lastBar      = 0;
 datetime g_cooldownEnd  = 0;
@@ -341,7 +361,8 @@ bool HasMarginFor(const ENUM_ORDER_TYPE type, const double volume, const double 
 //+------------------------------------------------------------------+
 //| Ouvre une position dans la direction demandee.                    |
 //+------------------------------------------------------------------+
-bool OpenTrade(const bool isBuy, const double atr, const double slDistRequested)
+bool OpenTrade(const bool isBuy, const double atr, const double slDistRequested,
+               const double tpDistRequested)
   {
    double entry = isBuy ? SymbolInfoDouble(g_sym, SYMBOL_ASK)
                         : SymbolInfoDouble(g_sym, SYMBOL_BID);
@@ -361,10 +382,14 @@ bool OpenTrade(const bool isBuy, const double atr, const double slDistRequested)
       return false;
 
    double sl = isBuy ? entry - slDist : entry + slDist;
+   //--- tpDistRequested > 0 : cible imposee par le moteur (retour a la
+   //--- moyenne). Sinon on retombe sur le multiple d'ATR global.
    double tp = 0.0;
-   if(InpTP_ATR > 0.0)
+   double tpDist = (tpDistRequested > 0.0) ? tpDistRequested
+                                           : (InpTP_ATR > 0.0 ? atr * InpTP_ATR : 0.0);
+   if(tpDist > 0.0)
      {
-      double tpDist = MathMax(atr * InpTP_ATR, minDist);
+      tpDist = MathMax(tpDist, minDist);
       tp = isBuy ? entry + tpDist : entry - tpDist;
      }
 
@@ -811,7 +836,7 @@ bool RegressionSignal(const double atr, int &dir, double &slDist)
 //+------------------------------------------------------------------+
 void CheckRegimeExit(const double atr)
   {
-   if(InpEngine == QUEU_ENGINE_BREAKOUT)
+   if(InpEngine != QUEU_ENGINE_REGRESSION && InpEngine != QUEU_ENGINE_BOTH)
       return;
    if(!InpReg_ExitOnBreak && !InpReg_ExitOnChannel)
       return;
@@ -857,21 +882,259 @@ void CheckRegimeExit(const double atr)
   }
 
 //+------------------------------------------------------------------+
+//| Regression d'un horizon lent, en mode multi-timeframe ou en mode  |
+//| longueurs embointees sur la TF de travail.                        |
+//|                                                                   |
+//| Les deux modes couvrent la MEME duree : une regression de 50      |
+//| bougies en M5 et une de 250 bougies en M1 portent toutes deux sur |
+//| 250 minutes. La difference est la matiere : le M5 agrege en OHLC  |
+//| (moins de bruit, moins de points), le M1 garde toutes les         |
+//| clotures (statistique plus fine, bruit plus present). Aucun des   |
+//| deux n'est superieur a priori — d'ou le choix laisse ouvert.      |
+//+------------------------------------------------------------------+
+bool SlowRung(const int idx, QRegResult &out)
+  {
+   ENUM_TIMEFRAMES tf = (idx == 0) ? InpMR_TF1 : InpMR_TF2;
+
+   if(InpMR_UseNested)
+     {
+      int base = PeriodSeconds(g_tf);
+      if(base <= 0)
+         return false;
+
+      int ratio = (int)MathMax(1.0, MathRound((double)PeriodSeconds(tf) / (double)base));
+
+      double atr;
+      if(!CopyOne(g_hATR, 0, 1, atr))
+         return false;
+
+      return QRegress(g_sym, g_tf, InpMR_Period * ratio, 1, atr, out);
+     }
+
+   double atrTF = 0.0;
+   int    h     = (idx == 0) ? g_hATR_TF1 : g_hATR_TF2;
+   if(h != INVALID_HANDLE)
+      CopyOne(h, 0, 1, atrTF);
+
+   return QRegress(g_sym, tf, InpMR_Period, 1, atrTF, out);
+  }
+
+//+------------------------------------------------------------------+
+//| Regime des horizons lents : +1 haussier, -1 baissier, 0 refus.    |
+//| Cinq severites au choix, du plus permissif au plus selectif.      |
+//+------------------------------------------------------------------+
+int MeanRevBias(const double close1)
+  {
+   QRegResult slow1, slow2;
+   if(!SlowRung(0, slow1) || !SlowRung(1, slow2))
+      return 0;
+
+   int s1 = (slow1.slope > 0.0) ? 1 : ((slow1.slope < 0.0) ? -1 : 0);
+   int s2 = (slow2.slope > 0.0) ? 1 : ((slow2.slope < 0.0) ? -1 : 0);
+
+   //--- le vote tolere un desaccord si l'horizon dissident est de mauvaise
+   //--- qualite : un R2 faible pese peu dans le score
+   if(InpMR_Confirm == QMR_CONFIRM_VOTE)
+     {
+      double score = (s1 * slow1.r2 + s2 * slow2.r2) / 2.0;
+      if(MathAbs(score) < InpMR_VoteThreshold)
+        {
+         g_blockReason = StringFormat("vote lent %.2f sous le seuil %.2f",
+                                      score, InpMR_VoteThreshold);
+         return 0;
+        }
+      return (score > 0.0) ? 1 : -1;
+     }
+
+   //--- tous les autres modes exigent d'abord un accord de signe franc
+   if(s1 == 0 || s2 == 0 || s1 != s2)
+     {
+      g_blockReason = "horizons lents en desaccord";
+      return 0;
+     }
+
+   int bias = s1;
+
+   if(InpMR_Confirm == QMR_CONFIRM_SIGN_R2)
+     {
+      if(slow1.r2 < InpMR_ConfirmMinR2 || slow2.r2 < InpMR_ConfirmMinR2)
+        {
+         g_blockReason = StringFormat("R2 lents %.2f / %.2f sous %.2f",
+                                      slow1.r2, slow2.r2, InpMR_ConfirmMinR2);
+         return 0;
+        }
+     }
+   else
+      if(InpMR_Confirm == QMR_CONFIRM_POSITION)
+        {
+         //--- acheter un repli qui part deja du haut du canal lent laisse
+         //--- peu de place avant la bande opposee : on l'ecarte
+         double pos = QRegPositionInChannel(slow2, close1, InpMR_EntryDev, InpReg_DevMode);
+
+         if(bias > 0 && pos > InpMR_MaxPosInChannel)
+           {
+            g_blockReason = StringFormat("deja a %.0f%% du canal lent", pos * 100.0);
+            return 0;
+           }
+         if(bias < 0 && pos < 1.0 - InpMR_MaxPosInChannel)
+           {
+            g_blockReason = StringFormat("deja a %.0f%% du canal lent", pos * 100.0);
+            return 0;
+           }
+        }
+      else
+         if(InpMR_Confirm == QMR_CONFIRM_SLOPE)
+           {
+            //--- un signe de pente ne dit rien de l'amplitude : une tendance
+            //--- quasi plate satisfait l'accord de signe sans offrir de biais
+            if(MathAbs(slow1.slopeATR) < InpMR_ConfirmMinSlope ||
+               MathAbs(slow2.slopeATR) < InpMR_ConfirmMinSlope)
+              {
+               g_blockReason = StringFormat("pentes lentes %.2f / %.2f sous %.2f ATR/fen.",
+                                            slow1.slopeATR, slow2.slopeATR,
+                                            InpMR_ConfirmMinSlope);
+               return 0;
+              }
+           }
+
+   return bias;
+  }
+
+//+------------------------------------------------------------------+
+//| Moteur 3 — retour a la moyenne en canal, confirme multi-horizon.  |
+//|                                                                   |
+//| On achete le bas du canal rapide, mais seulement quand les deux   |
+//| horizons lents sont haussiers : contre-tendance sur le bruit,     |
+//| dans le sens du regime.                                            |
+//|                                                                   |
+//| Le filtre decisif n'est pas le signal mais le COUT : a l'echelle  |
+//| de la minute, le spread represente une fraction non negligeable   |
+//| de la largeur du canal. On calcule donc le taux de reussite       |
+//| minimal impose par la geometrie et le cout courant, et on refuse  |
+//| le trade si ce seuil est deja hors d'atteinte.                    |
+//+------------------------------------------------------------------+
+bool MeanRevSignal(const double atr, int &dir, double &slDist, double &tpDist)
+  {
+   dir    = 0;
+   slDist = 0.0;
+   tpDist = 0.0;
+
+   if(InpMR_StopDev <= InpMR_EntryDev)
+      return false;
+
+   double close1 = iClose(g_sym, g_tf, 1);
+   if(close1 <= 0.0)
+      return false;
+
+   QRegResult fast;
+   if(!QRegress(g_sym, g_tf, InpMR_Period, 1, atr, fast))
+      return false;
+
+   double dev = QRegDev(fast, InpReg_DevMode);
+   if(dev <= 0.0)
+      return false;
+
+   int bias = MeanRevBias(close1);
+   if(bias == 0)
+      return false;
+
+   //--- canal rapide de couleur opposee : le repli est effectivement en
+   //--- cours, on n'achete pas une simple respiration horizontale
+   if(InpMR_RequireOpposite)
+     {
+      if(bias > 0 && fast.slope >= 0.0)
+        {
+         g_blockReason = "canal rapide pas encore retourne";
+         return false;
+        }
+      if(bias < 0 && fast.slope <= 0.0)
+        {
+         g_blockReason = "canal rapide pas encore retourne";
+         return false;
+        }
+     }
+
+   //--- cout aller-retour : spread courant plus un forfait optionnel
+   double point = SymbolInfoDouble(g_sym, SYMBOL_POINT);
+   double cost  = (SymbolInfoDouble(g_sym, SYMBOL_ASK) - SymbolInfoDouble(g_sym, SYMBOL_BID))
+                + InpMR_CostPoints * point;
+
+   double be = QRegBreakevenRate(dev, cost, InpMR_EntryDev,
+                                 InpMR_StopDev, InpMR_TargetDev) * 100.0;
+
+   if(InpMR_MaxBreakeven > 0.0 && be > InpMR_MaxBreakeven)
+     {
+      g_blockReason = StringFormat("p* requis %.1f%% > %.1f%% : canal trop etroit "
+                                   "pour le cout", be, InpMR_MaxBreakeven);
+      return false;
+     }
+
+   if(bias > 0)
+     {
+      if(!InpAllowLong)
+         return false;
+
+      if(close1 > fast.value - InpMR_EntryDev * dev)
+        {
+         g_blockReason = "bande basse non atteinte";
+         return false;
+        }
+
+      slDist = close1 - (fast.value - InpMR_StopDev * dev);
+      tpDist = (fast.value + InpMR_TargetDev * dev) - close1;
+      dir    = 1;
+     }
+   else
+     {
+      if(!InpAllowShort)
+         return false;
+
+      if(close1 < fast.value + InpMR_EntryDev * dev)
+        {
+         g_blockReason = "bande haute non atteinte";
+         return false;
+        }
+
+      slDist = (fast.value + InpMR_StopDev * dev) - close1;
+      tpDist = close1 - (fast.value - InpMR_TargetDev * dev);
+      dir    = -1;
+     }
+
+   //--- le prix a deja depasse le stop ou la cible : plus de geometrie
+   if(slDist <= 0.0 || tpDist <= 0.0)
+     {
+      g_blockReason = "prix hors de la geometrie du setup";
+      dir = 0;
+      return false;
+     }
+
+   return true;
+  }
+
+//+------------------------------------------------------------------+
 //| Evalue le signal sur la bougie qui vient de cloturer.              |
 //+------------------------------------------------------------------+
 void EvaluateSignal(const double atr)
   {
    int    dir    = 0;
    double slDist = 0.0;
+   double tpDist = 0.0;
    bool   signal = false;
 
-   if(InpEngine == QUEU_ENGINE_BREAKOUT || InpEngine == QUEU_ENGINE_BOTH)
-      signal = BreakoutSignal(atr, dir, slDist);
+   if(InpEngine == QUEU_ENGINE_MEANREV)
+     {
+      signal = MeanRevSignal(atr, dir, slDist, tpDist);
+     }
+   else
+     {
+      if(InpEngine == QUEU_ENGINE_BREAKOUT || InpEngine == QUEU_ENGINE_BOTH)
+         signal = BreakoutSignal(atr, dir, slDist);
 
-   //--- en mode BOTH, la regression n'est consultee que si la cassure
-   //--- n'a rien produit : premier signal servi
-   if(!signal && (InpEngine == QUEU_ENGINE_REGRESSION || InpEngine == QUEU_ENGINE_BOTH))
-      signal = RegressionSignal(atr, dir, slDist);
+      //--- en mode BOTH, la regression n'est consultee que si la cassure
+      //--- n'a rien produit : premier signal servi
+      if(!signal && (InpEngine == QUEU_ENGINE_REGRESSION || InpEngine == QUEU_ENGINE_BOTH))
+         signal = RegressionSignal(atr, dir, slDist);
+     }
 
    if(!signal || dir == 0 || slDist <= 0.0)
       return;
@@ -879,7 +1142,7 @@ void EvaluateSignal(const double atr)
    if(!EntryAllowed(atr))
       return;
 
-   OpenTrade(dir > 0, atr, slDist);
+   OpenTrade(dir > 0, atr, slDist, tpDist);
   }
 
 //+------------------------------------------------------------------+
@@ -1044,6 +1307,51 @@ int OnInit(void)
                      "l'historique soit suffisant.", Bars(g_sym, g_tf), needed);
      }
 
+   if(InpEngine == QUEU_ENGINE_MEANREV)
+     {
+      if(InpMR_Period < 5)
+        {
+         Print("[Queu] InpMR_Period doit valoir au moins 5.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpMR_StopDev <= InpMR_EntryDev)
+        {
+         Print("[Queu] InpMR_StopDev doit depasser InpMR_EntryDev : sinon le stop "
+               "est deja franchi au moment ou la bande est touchee.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpMR_EntryDev + InpMR_TargetDev <= 0.0)
+        {
+         Print("[Queu] La cible doit se situer au-dessus du point d'entree : "
+               "InpMR_EntryDev + InpMR_TargetDev doit etre positif.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(!InpMR_UseNested)
+        {
+         if(PeriodSeconds(InpMR_TF1) <= PeriodSeconds(g_tf) ||
+            PeriodSeconds(InpMR_TF2) <= PeriodSeconds(InpMR_TF1))
+           {
+            Print("[Queu] Les horizons doivent etre strictement croissants : "
+                  "TF de travail < InpMR_TF1 < InpMR_TF2.");
+            return INIT_PARAMETERS_INCORRECT;
+           }
+        }
+      if(InpUseTrailing || InpUseBreakEven)
+         Print("[Queu] Attention : trailing ou break-even actif avec le moteur de "
+               "retour a la moyenne. Ce moteur vise une cible fixe ; deplacer le "
+               "stop rogne le gain sans rallonger la cible.");
+
+      //--- l'horizon le plus lent doit disposer d'assez d'historique
+      int deepest = InpMR_UseNested
+                    ? InpMR_Period * (int)MathMax(1.0, MathRound((double)PeriodSeconds(InpMR_TF2)
+                                                                 / (double)PeriodSeconds(g_tf)))
+                    : InpMR_Period;
+      ENUM_TIMEFRAMES deepTF = InpMR_UseNested ? g_tf : InpMR_TF2;
+      if(Bars(g_sym, deepTF) < deepest + 10)
+         PrintFormat("[Queu] Attention : %d bougies en %s, l'horizon lent en demande %d.",
+                     Bars(g_sym, deepTF), EnumToString(deepTF), deepest);
+     }
+
    if(InpUsePartial && (InpPartialPct <= 0.0 || InpPartialPct >= 100.0))
      {
       Print("[Queu] InpPartialPct doit etre dans ]0, 100[.");
@@ -1065,6 +1373,17 @@ int OnInit(void)
       if(g_hEmaFast == INVALID_HANDLE || g_hEmaSlow == INVALID_HANDLE)
         {
          Print("[Queu] Creation des handles EMA impossible.");
+         return INIT_FAILED;
+        }
+     }
+
+   if(InpEngine == QUEU_ENGINE_MEANREV && !InpMR_UseNested)
+     {
+      g_hATR_TF1 = iATR(g_sym, InpMR_TF1, InpATRPeriod);
+      g_hATR_TF2 = iATR(g_sym, InpMR_TF2, InpATRPeriod);
+      if(g_hATR_TF1 == INVALID_HANDLE || g_hATR_TF2 == INVALID_HANDLE)
+        {
+         Print("[Queu] Creation des handles ATR des horizons lents impossible.");
          return INIT_FAILED;
         }
      }
@@ -1112,6 +1431,8 @@ void OnDeinit(const int reason)
    if(g_hEmaFast != INVALID_HANDLE) IndicatorRelease(g_hEmaFast);
    if(g_hEmaSlow != INVALID_HANDLE) IndicatorRelease(g_hEmaSlow);
    if(g_hADX     != INVALID_HANDLE) IndicatorRelease(g_hADX);
+   if(g_hATR_TF1 != INVALID_HANDLE) IndicatorRelease(g_hATR_TF1);
+   if(g_hATR_TF2 != INVALID_HANDLE) IndicatorRelease(g_hATR_TF2);
 
    Comment("");
   }

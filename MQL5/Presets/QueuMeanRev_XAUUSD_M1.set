@@ -1,8 +1,28 @@
-; QueuBreakoutEA - XAUUSD H1, moteur CASSURE.
-InpEngine=0
-InpMagic=770101
-InpComment=QueuBrk-XAU
-InpTimeframe=16385
+; QueuBreakoutEA - XAUUSD M1, moteur RETOUR A LA MOYENNE multi-horizon.
+;
+; Achete le bas du canal M1 / vend le haut, mais seulement dans le sens
+; des horizons lents (M3 et M5). Contre-tendance sur le bruit, dans le
+; sens du regime.
+;
+; Geometrie retenue d'apres tools/meanrev_breakeven.py :
+;   entree 2.0 dev / stop 3.0 dev / cible +0.5 dev au-dela de la droite.
+;   Viser AU-DELA de la droite est le plus gros levier sur la tolerance
+;   au cout : 0.80 -> 1.40 en cout/dev absorbable.
+;
+; Les filtres spread/ATR sont DESACTIVES a dessein : a M1 l'ATR est trop
+; petit pour que ce ratio ait un sens. Le filtre de cout est ici
+; InpMR_MaxBreakeven, qui compare le cout a la largeur du CANAL et refuse
+; le trade si le taux de reussite requis depasse 60%.
+;
+; Trailing et break-even desactives : la cible est fixe, deplacer le stop
+; rogne le gain sans rallonger la cible.
+;
+; A OPTIMISER EN PRIORITE : InpMR_Confirm (0 a 4), c'est le mode de
+; confirmation des horizons lents et la question ouverte de ce setup.
+InpEngine=3
+InpMagic=770106
+InpComment=QueuMR-XAU
+InpTimeframe=1
 InpSlippagePoints=30
 InpShowPanel=true
 InpChannelPeriod=20
@@ -10,29 +30,29 @@ InpATRPeriod=14
 InpAllowLong=true
 InpAllowShort=true
 InpCloseOnOpposite=false
-InpUseTrendFilter=true
+InpUseTrendFilter=false
 InpTrendTF=0
 InpEmaFast=21
 InpEmaSlow=50
-InpUseADXFilter=true
+InpUseADXFilter=false
 InpADXPeriod=14
 InpADXMin=20.0
 InpMinATRPoints=0.0
 InpMaxSpreadPoints=0.0
-InpMaxSpreadATRRatio=0.12
-InpRiskPercent=0.5
+InpMaxSpreadATRRatio=0.0
+InpRiskPercent=0.25
 InpFixedLot=0.0
 InpForceMinLot=false
 InpMaxPositions=1
 InpMaxDailyLossPct=3.0
 InpMaxDailyProfitPct=0.0
-InpCooldownBars=2
+InpCooldownBars=5
 InpSL_ATR=2.0
 InpTP_ATR=0.0
-InpUseBreakEven=true
+InpUseBreakEven=false
 InpBE_ATR=1.0
 InpBE_LockATR=0.10
-InpUseTrailing=true
+InpUseTrailing=false
 InpTrail_ATR=2.0
 InpTrailStepPoints=20.0
 InpMR_Period=50
@@ -61,7 +81,7 @@ InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
 InpReg_ExitOnChannel=true
 InpReg_ChannelMult=2.00
-InpUseERFilter=true
+InpUseERFilter=false
 InpERPeriod=20
 InpERMin=0.30
 InpBreakoutATR=0.10

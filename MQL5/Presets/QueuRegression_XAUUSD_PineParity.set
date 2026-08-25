@@ -1,17 +1,5 @@
-; QueuBreakoutEA - XAUUSD H1, parite visuelle avec le
-; 'Linear Regression Channel' de LonesomeTheBlue (TradingView).
-;
-; InpReg_DevMode=2 (PINE) reproduit sa mesure de dispersion, qui vaut
-;   dev = sqrt(SSres/n + pente^2)
-; et non l'erreur-type : sa boucle evalue la droite avec un decalage
-; d'une bougie, ce qui decale chaque residu de -pente. Les bandes sont
-; donc plus larges que la dispersion reelle des que la pente est forte.
-;
-; InpReg_BasePeriod=25 -> echelons 25/50/100/200 : l'echelon 100 est la
-; longueur par defaut de l'indicateur. InpReg_ChannelMult=2.0 = son devlen.
-;
-; A utiliser pour comparer l'EA a ce que tu vois sur TradingView.
-; Pour trader, prefere InpReg_DevMode=0 (erreur-type).
+; Parite visuelle avec le 'Linear Regression Channel' de LonesomeTheBlue.
+; InpReg_DevMode=2 reproduit sa dispersion sqrt(SSres/n + pente^2).
 InpEngine=1
 InpMagic=770105
 InpComment=QueuPine-XAU
@@ -48,6 +36,21 @@ InpBE_LockATR=0.10
 InpUseTrailing=true
 InpTrail_ATR=2.5
 InpTrailStepPoints=20.0
+InpMR_Period=50
+InpMR_EntryDev=2.00
+InpMR_StopDev=3.00
+InpMR_TargetDev=0.50
+InpMR_Confirm=1
+InpMR_UseNested=false
+InpMR_TF1=3
+InpMR_TF2=5
+InpMR_RequireOpposite=true
+InpMR_ConfirmMinR2=0.25
+InpMR_VoteThreshold=0.40
+InpMR_MaxPosInChannel=0.50
+InpMR_ConfirmMinSlope=0.50
+InpMR_MaxBreakeven=60.0
+InpMR_CostPoints=0.0
 InpReg_BasePeriod=25
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35
