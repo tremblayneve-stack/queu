@@ -19,6 +19,7 @@ décider s'il a réellement un edge.
 - [Moteur 1 — cassure de canal](#moteur-1--cassure-de-canal)
 - [Moteur 2 — chaîne de régressions linéaires](#moteur-2--chaîne-de-régressions-linéaires)
 - [Moteur 3 — retour à la moyenne multi-horizon](#moteur-3--retour-à-la-moyenne-multi-horizon)
+- [Moteur 4 — retournement sur épuisement](#moteur-4--retournement-sur-épuisement)
 - [Ce qui améliore réellement le rendement](#ce-qui-améliore-réellement-le-rendement)
   - [1. Le critère d'optimisation (levier principal)](#1-le-critère-doptimisation-levier-principal)
   - [2. Le sizing adaptatif](#2-le-sizing-adaptatif)
@@ -44,6 +45,7 @@ d'optimisation — seule la condition d'entrée diffère.
 | `QUEU_ENGINE_REGRESSION` | le **repli** dans une tendance établie | σ des résidus |
 | `QUEU_ENGINE_BOTH` | les deux, premier signal servi | selon le moteur |
 | `QUEU_ENGINE_MEANREV` | le **bas du canal** rapide, dans le sens des horizons lents | dev du canal |
+| `QUEU_ENGINE_REVERSAL` | le **rebond** sur la bande rapide, contre des horizons lents **épuisés** | dev du canal |
 
 Ce ne sont pas deux variantes du même signal : l'un entre quand le prix
 s'échappe, l'autre quand il revient. **Ils ne se déclenchent pas aux mêmes
@@ -305,6 +307,77 @@ L'EA émet un avertissement au démarrage s'ils sont laissés actifs.
 
 ---
 
+## Moteur 4 — retournement sur épuisement
+
+Les moteurs 3 et 4 se ressemblent de loin — tous deux entrent sur une bande du
+canal rapide — mais leurs prémisses sont **opposées**. Ne pas les confondre :
+
+| | Moteur 3 `MEANREV` | Moteur 4 `REVERSAL` |
+|---|---|---|
+| Horizons lents (M3/M5) | **verts**, d'accord avec le trade | **rouges**, en désaccord |
+| Prix dans le canal lent | partie **basse** | partie **haute**, voire **sorti** |
+| Canal rapide (M1) | **rouge** — le repli est en cours | **vert** — a déjà basculé |
+| Nature | continuation | **contre-tendance sur épuisement** |
+
+La thèse du moteur 4 : *la baisse de fond n'arrive plus à faire baisser le prix.
+Il stagne en haut de son canal descendant, ou en est sorti. Le M1 a déjà tourné.
+J'achète le premier repli plutôt que la pleine impulsion.*
+
+### La séquence, pour un achat
+
+1. **Canal rapide vert** — c'est lui qui donne la direction candidate.
+2. **Les deux horizons lents rouges** — obligatoire, sans exception.
+3. **Qualité minimale des lents** (`InpRV_MinSlowR2`) — sans un R² plancher, le
+   signe de la pente est du bruit et parler de canal « rouge » n'a aucun sens.
+4. **Épuisement** sur au moins `InpRV_ExhaustRequire` horizon(s) — voir ci-dessous.
+5. **Rebond confirmé** sur la bande basse du canal M1 : le prix doit avoir
+   **percé** la bande dans les `InpRV_BounceBars` dernières bougies, puis être
+   **revenu au-dessus**. Une simple touche ne suffit pas — c'est ce que veut dire
+   « rebond ».
+6. **Filtre de coût** : `p*` calculé en direct, refus au-delà de
+   `InpRV_MaxBreakeven`.
+
+Symétrique pour la vente.
+
+### Les deux définitions de l'épuisement — à départager
+
+C'est **le** point à mesurer, et j'ai une opinion :
+
+| Critère | Déclenchement | Signification |
+|---|---|---|
+| `InpRV_AcceptBreakout` | le prix **sort** du canal lent par le haut | rare, significatif |
+| `InpRV_AcceptPosition` | le prix est au-dessus de `InpRV_SlowPosMin` **dans** le canal | fréquent, ambigu |
+
+**Être haut dans un canal descendant est l'état normal de chaque respiration
+d'une baisse saine.** Pris seul, ce critère se déclenchera en permanence et
+produira surtout des shorts manqués retournés en achats. La sortie effective du
+canal, elle, dit quelque chose : le prix a monté plus vite que la dérive
+baissière ne descend.
+
+Les presets activent les deux (ta spécification littérale), mais **le premier
+A/B test à faire est `InpRV_AcceptPosition=false`**. Le journal tranchera : les
+colonnes `reg_r2` et `reg_slope_atr` sont déjà enregistrées, et
+`analyze_queu.py` les découpe en tranches.
+
+### Variantes orthogonales
+
+| Paramètre | Alternative |
+|---|---|
+| `InpRV_ExhaustRequire` | 1 = un seul horizon épuisé suffit · 2 = les deux |
+| `InpRV_RequireBounce` | `false` = entrée dès la touche, sans confirmation |
+| `InpRV_RequireFlatten` | `true` = exige en plus que la pente lente **ralentisse**, en comparant la régression courante à la même un demi-cycle plus tôt. Un vrai épuisement décélère avant de se retourner ; une respiration ordinaire laisse la pente de fond intacte. |
+| `InpRV_UseNested` | remplace les deux timeframes par deux longueurs sur la TF de travail |
+
+### Mise en garde
+
+C'est un setup de **contre-tendance au niveau du régime**. Ce type de signal a
+structurellement un taux de réussite plus faible qu'une continuation — le seuil
+de rentabilité de la section précédente compte donc double ici. Les presets
+partent à `InpRiskPercent=0.20` (or) et `0.15` (BTC), soit moins que tous les
+autres moteurs, délibérément.
+
+---
+
 ## Ce qui améliore réellement le rendement
 
 ### 1. Le critère d'optimisation (levier principal)
@@ -500,6 +573,8 @@ L'outil affiche les deux valeurs exactes à recopier.
 | `QueuRegression_XAUUSD_PineParity.set` | XAUUSD H1 | **Parité TradingView.** Mode PINE, échelons 25/50/100/200, `devlen`=2, magic 770105 |
 | `QueuMeanRev_XAUUSD_M1.set` | XAUUSD **M1** | **Retour à la moyenne.** M3/M5, D=2 S=3 T=+0,5, `p*` max 60 %, magic 770106 |
 | `QueuMeanRev_BTCUSD_M1.set` | BTCUSD **M1** | **Retour à la moyenne.** N=60, mêmes seuils, week-end exclu, magic 770107 |
+| `QueuReversal_XAUUSD_M1.set` | XAUUSD **M1** | **Retournement.** M3/M5 épuisés, rebond confirmé, D=1 S=2 T=+1, magic 770108 |
+| `QueuReversal_BTCUSD_M1.set` | BTCUSD **M1** | **Retournement.** N=60, risque 0,15 %, week-end exclu, magic 770109 |
 
 Les magic numbers des presets de régression sont distincts : les deux moteurs
 peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.

@@ -1,24 +1,7 @@
-; QueuBreakoutEA - XAUUSD M1, moteur RETOUR A LA MOYENNE multi-horizon.
-;
-; Achete le bas du canal M1 / vend le haut, mais seulement dans le sens
-; des horizons lents (M3 et M5). Contre-tendance sur le bruit, dans le
-; sens du regime.
-;
-; Geometrie retenue d'apres tools/meanrev_breakeven.py :
-;   entree 2.0 dev / stop 3.0 dev / cible +0.5 dev au-dela de la droite.
-;   Viser AU-DELA de la droite est le plus gros levier sur la tolerance
-;   au cout : 0.80 -> 1.40 en cout/dev absorbable.
-;
-; Les filtres spread/ATR sont DESACTIVES a dessein : a M1 l'ATR est trop
-; petit pour que ce ratio ait un sens. Le filtre de cout est ici
-; InpMR_MaxBreakeven, qui compare le cout a la largeur du CANAL et refuse
-; le trade si le taux de reussite requis depasse 60%.
-;
-; Trailing et break-even desactives : la cible est fixe, deplacer le stop
-; rogne le gain sans rallonger la cible.
-;
-; A OPTIMISER EN PRIORITE : InpMR_Confirm (0 a 4), c'est le mode de
-; confirmation des horizons lents et la question ouverte de ce setup.
+; XAUUSD M1 - moteur RETOUR A LA MOYENNE (continuation).
+; Les horizons lents M3/M5 sont d'ACCORD avec le trade ; on achete le repli
+; du canal rapide. Geometrie D=2 S=3 T=+0.5 issue de tools/meanrev_breakeven.py.
+; A optimiser en priorite : InpMR_Confirm (0 a 4).
 InpEngine=3
 InpMagic=770106
 InpComment=QueuMR-XAU
@@ -70,6 +53,24 @@ InpMR_MaxPosInChannel=0.50
 InpMR_ConfirmMinSlope=0.50
 InpMR_MaxBreakeven=60.0
 InpMR_CostPoints=0.0
+InpRV_Period=50
+InpRV_TF1=3
+InpRV_TF2=5
+InpRV_UseNested=false
+InpRV_SlowChannelMult=2.00
+InpRV_MinSlowR2=0.20
+InpRV_AcceptBreakout=true
+InpRV_AcceptPosition=true
+InpRV_SlowPosMin=0.75
+InpRV_ExhaustRequire=1
+InpRV_RequireFlatten=false
+InpRV_RequireBounce=true
+InpRV_BounceBars=3
+InpRV_EntryDev=1.00
+InpRV_StopDev=2.00
+InpRV_TargetDev=1.00
+InpRV_MaxBreakeven=60.0
+InpRV_CostPoints=0.0
 InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35

@@ -1,8 +1,28 @@
-; BTCUSD H1 - CHAINE DE REGRESSIONS (repli en tendance).
-InpEngine=1
-InpMagic=770104
-InpComment=QueuReg-BTC
-InpTimeframe=16385
+; BTCUSD M1 - moteur RETOURNEMENT SUR EPUISEMENT (contre-tendance).
+;
+; Les horizons lents M3/M5 sont CONTRAIRES au trade (canal rouge pour un
+; achat) mais le prix stagne en haut de leur canal, voire en est sorti : la
+; baisse n'arrive plus a produire son mouvement. Le canal M1 a deja bascule
+; en vert. On entre sur le premier rebond confirme sur sa bande basse.
+;
+; A A/B TESTER EN PREMIER : InpRV_AcceptPosition.
+;   Etre haut DANS un canal descendant est l'etat NORMAL de chaque
+;   respiration d'une baisse saine : ce critere seul se declenche en
+;   permanence. La SORTIE de canal (InpRV_AcceptBreakout) est bien plus
+;   rare et bien plus significative. Compare les deux au journal avant de
+;   garder la version permissive.
+;
+; Autres variantes a mesurer :
+;   InpRV_ExhaustRequire  1 = un seul horizon epuise suffit, 2 = les deux
+;   InpRV_RequireBounce   false = entree des la touche, sans confirmation
+;   InpRV_RequireFlatten  true  = exige un ralentissement de la pente lente
+;
+; Setup de CONTRE-TENDANCE : taux de reussite structurellement plus faible
+; qu'une continuation. Le filtre InpRV_MaxBreakeven compte double ici.
+InpEngine=4
+InpMagic=770109
+InpComment=QueuRev-BTC
+InpTimeframe=1
 InpSlippagePoints=100
 InpShowPanel=true
 InpChannelPeriod=24
@@ -10,30 +30,30 @@ InpATRPeriod=14
 InpAllowLong=true
 InpAllowShort=true
 InpCloseOnOpposite=false
-InpUseTrendFilter=true
+InpUseTrendFilter=false
 InpTrendTF=16388
 InpEmaFast=21
 InpEmaSlow=50
-InpUseADXFilter=true
+InpUseADXFilter=false
 InpADXPeriod=14
 InpADXMin=22.0
 InpMinATRPoints=0.0
 InpMaxSpreadPoints=0.0
-InpMaxSpreadATRRatio=0.15
-InpRiskPercent=0.35
+InpMaxSpreadATRRatio=0.0
+InpRiskPercent=0.15
 InpFixedLot=0.0
 InpForceMinLot=false
 InpMaxPositions=1
 InpMaxDailyLossPct=3.0
 InpMaxDailyProfitPct=0.0
-InpCooldownBars=3
+InpCooldownBars=5
 InpSL_ATR=2.5
 InpTP_ATR=0.0
-InpUseBreakEven=true
+InpUseBreakEven=false
 InpBE_ATR=1.2
 InpBE_LockATR=0.10
-InpUseTrailing=true
-InpTrail_ATR=3.0
+InpUseTrailing=false
+InpTrail_ATR=2.5
 InpTrailStepPoints=100.0
 InpMR_Period=50
 InpMR_EntryDev=2.00
@@ -50,7 +70,7 @@ InpMR_MaxPosInChannel=0.50
 InpMR_ConfirmMinSlope=0.50
 InpMR_MaxBreakeven=60.0
 InpMR_CostPoints=0.0
-InpRV_Period=50
+InpRV_Period=60
 InpRV_TF1=3
 InpRV_TF2=5
 InpRV_UseNested=false
@@ -68,18 +88,18 @@ InpRV_StopDev=2.00
 InpRV_TargetDev=1.00
 InpRV_MaxBreakeven=60.0
 InpRV_CostPoints=0.0
-InpReg_BasePeriod=24
+InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
-InpReg_MinR2=0.30
-InpReg_MinSlopeATR=1.20
+InpReg_MinR2=0.35
+InpReg_MinSlopeATR=1.00
 InpReg_DevMode=0
-InpReg_EntrySigma=1.20
-InpReg_StopSigma=3.00
+InpReg_EntrySigma=1.00
+InpReg_StopSigma=2.50
 InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
 InpReg_ExitOnChannel=true
 InpReg_ChannelMult=2.00
-InpUseERFilter=true
+InpUseERFilter=false
 InpERPeriod=20
 InpERMin=0.35
 InpBreakoutATR=0.15

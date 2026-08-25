@@ -1,4 +1,4 @@
-; QueuBreakoutEA - XAUUSD H1, moteur CHAINE DE REGRESSIONS (repli en tendance).
+; XAUUSD H1 - CHAINE DE REGRESSIONS (repli en tendance).
 InpEngine=1
 InpMagic=770103
 InpComment=QueuReg-XAU
@@ -50,6 +50,24 @@ InpMR_MaxPosInChannel=0.50
 InpMR_ConfirmMinSlope=0.50
 InpMR_MaxBreakeven=60.0
 InpMR_CostPoints=0.0
+InpRV_Period=50
+InpRV_TF1=3
+InpRV_TF2=5
+InpRV_UseNested=false
+InpRV_SlowChannelMult=2.00
+InpRV_MinSlowR2=0.20
+InpRV_AcceptBreakout=true
+InpRV_AcceptPosition=true
+InpRV_SlowPosMin=0.75
+InpRV_ExhaustRequire=1
+InpRV_RequireFlatten=false
+InpRV_RequireBounce=true
+InpRV_BounceBars=3
+InpRV_EntryDev=1.00
+InpRV_StopDev=2.00
+InpRV_TargetDev=1.00
+InpRV_MaxBreakeven=60.0
+InpRV_CostPoints=0.0
 InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35

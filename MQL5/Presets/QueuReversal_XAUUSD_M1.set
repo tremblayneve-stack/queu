@@ -1,8 +1,28 @@
-; XAUUSD H1 - moteur CASSURE de canal Donchian.
-InpEngine=0
-InpMagic=770101
-InpComment=QueuBrk-XAU
-InpTimeframe=16385
+; XAUUSD M1 - moteur RETOURNEMENT SUR EPUISEMENT (contre-tendance).
+;
+; Les horizons lents M3/M5 sont CONTRAIRES au trade (canal rouge pour un
+; achat) mais le prix stagne en haut de leur canal, voire en est sorti : la
+; baisse n'arrive plus a produire son mouvement. Le canal M1 a deja bascule
+; en vert. On entre sur le premier rebond confirme sur sa bande basse.
+;
+; A A/B TESTER EN PREMIER : InpRV_AcceptPosition.
+;   Etre haut DANS un canal descendant est l'etat NORMAL de chaque
+;   respiration d'une baisse saine : ce critere seul se declenche en
+;   permanence. La SORTIE de canal (InpRV_AcceptBreakout) est bien plus
+;   rare et bien plus significative. Compare les deux au journal avant de
+;   garder la version permissive.
+;
+; Autres variantes a mesurer :
+;   InpRV_ExhaustRequire  1 = un seul horizon epuise suffit, 2 = les deux
+;   InpRV_RequireBounce   false = entree des la touche, sans confirmation
+;   InpRV_RequireFlatten  true  = exige un ralentissement de la pente lente
+;
+; Setup de CONTRE-TENDANCE : taux de reussite structurellement plus faible
+; qu'une continuation. Le filtre InpRV_MaxBreakeven compte double ici.
+InpEngine=4
+InpMagic=770108
+InpComment=QueuRev-XAU
+InpTimeframe=1
 InpSlippagePoints=30
 InpShowPanel=true
 InpChannelPeriod=20
@@ -10,29 +30,29 @@ InpATRPeriod=14
 InpAllowLong=true
 InpAllowShort=true
 InpCloseOnOpposite=false
-InpUseTrendFilter=true
+InpUseTrendFilter=false
 InpTrendTF=0
 InpEmaFast=21
 InpEmaSlow=50
-InpUseADXFilter=true
+InpUseADXFilter=false
 InpADXPeriod=14
 InpADXMin=20.0
 InpMinATRPoints=0.0
 InpMaxSpreadPoints=0.0
-InpMaxSpreadATRRatio=0.12
-InpRiskPercent=0.5
+InpMaxSpreadATRRatio=0.0
+InpRiskPercent=0.20
 InpFixedLot=0.0
 InpForceMinLot=false
 InpMaxPositions=1
 InpMaxDailyLossPct=3.0
 InpMaxDailyProfitPct=0.0
-InpCooldownBars=2
+InpCooldownBars=5
 InpSL_ATR=2.0
 InpTP_ATR=0.0
-InpUseBreakEven=true
+InpUseBreakEven=false
 InpBE_ATR=1.0
 InpBE_LockATR=0.10
-InpUseTrailing=true
+InpUseTrailing=false
 InpTrail_ATR=2.0
 InpTrailStepPoints=20.0
 InpMR_Period=50
@@ -79,7 +99,7 @@ InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
 InpReg_ExitOnChannel=true
 InpReg_ChannelMult=2.00
-InpUseERFilter=true
+InpUseERFilter=false
 InpERPeriod=20
 InpERMin=0.30
 InpBreakoutATR=0.10
