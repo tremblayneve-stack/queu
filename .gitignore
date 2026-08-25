@@ -1,0 +1,13 @@
+# Binaires compiles MetaTrader
+*.ex4
+*.ex5
+
+# Sorties du testeur de strategie
+*.htm
+*.html
+tester/
+Files/
+
+# Systeme
+.DS_Store
+Thumbs.db

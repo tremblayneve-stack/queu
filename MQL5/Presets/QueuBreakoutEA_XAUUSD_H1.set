@@ -1,0 +1,43 @@
+; QueuBreakoutEA - preset de depart XAUUSD H1
+; Point de depart pour l'optimisation, PAS un reglage valide en reel.
+; A charger dans le testeur de strategie via "Charger" puis a re-optimiser
+; sur les donnees de TON broker (le spread et le point de l'or varient beaucoup).
+InpMagic=770101
+InpComment=QueuBrk-XAU
+InpTimeframe=16385
+InpSlippagePoints=30
+InpShowPanel=true
+InpChannelPeriod=20
+InpATRPeriod=14
+InpAllowLong=true
+InpAllowShort=true
+InpCloseOnOpposite=false
+InpUseTrendFilter=true
+InpTrendTF=0
+InpEmaFast=21
+InpEmaSlow=50
+InpUseADXFilter=true
+InpADXPeriod=14
+InpADXMin=20.0
+InpMinATRPoints=0.0
+InpMaxSpreadPoints=0.0
+InpMaxSpreadATRRatio=0.12
+InpRiskPercent=0.5
+InpFixedLot=0.0
+InpForceMinLot=false
+InpMaxPositions=1
+InpMaxDailyLossPct=3.0
+InpMaxDailyProfitPct=0.0
+InpCooldownBars=2
+InpSL_ATR=2.0
+InpTP_ATR=0.0
+InpUseBreakEven=true
+InpBE_ATR=1.0
+InpBE_LockATR=0.1
+InpUseTrailing=true
+InpTrail_ATR=2.0
+InpTrailStepPoints=20.0
+InpUseSession=true
+InpSessionFrom=7
+InpSessionTo=20
+InpSkipWeekend=false
