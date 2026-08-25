@@ -1,7 +1,6 @@
 ; QueuBreakoutEA - BTCUSD H1, moteur CHAINE DE REGRESSIONS.
-; Repli exige plus profond (1.2 sigma) et stop plus large (3.0 sigma) :
-; la dispersion du BTC autour de la droite a des queues plus epaisses,
-; un stop a 2.5 sigma serait emporte par la simple respiration.
+; Repli exige plus profond (1.2) et stop plus large (3.0) : la dispersion
+; du BTC autour de la droite a des queues plus epaisses.
 InpEngine=1
 InpMagic=770104
 InpComment=QueuReg-BTC
@@ -42,10 +41,13 @@ InpReg_BasePeriod=24
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.30
 InpReg_MinSlopeATR=1.20
+InpReg_DevMode=0
 InpReg_EntrySigma=1.20
 InpReg_StopSigma=3.00
 InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
+InpReg_ExitOnChannel=true
+InpReg_ChannelMult=2.00
 InpUseERFilter=true
 InpERPeriod=20
 InpERMin=0.35

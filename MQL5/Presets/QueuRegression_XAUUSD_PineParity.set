@@ -1,9 +1,20 @@
-; QueuBreakoutEA - XAUUSD H1, moteur CASSURE de canal Donchian.
-; Point de depart pour l'optimisation, PAS un reglage valide en reel.
-; 1re passe d'optimisation : laisser InpTester_Trials=0.
-InpEngine=0
-InpMagic=770101
-InpComment=QueuBrk-XAU
+; QueuBreakoutEA - XAUUSD H1, parite visuelle avec le
+; 'Linear Regression Channel' de LonesomeTheBlue (TradingView).
+;
+; InpReg_DevMode=2 (PINE) reproduit sa mesure de dispersion, qui vaut
+;   dev = sqrt(SSres/n + pente^2)
+; et non l'erreur-type : sa boucle evalue la droite avec un decalage
+; d'une bougie, ce qui decale chaque residu de -pente. Les bandes sont
+; donc plus larges que la dispersion reelle des que la pente est forte.
+;
+; InpReg_BasePeriod=25 -> echelons 25/50/100/200 : l'echelon 100 est la
+; longueur par defaut de l'indicateur. InpReg_ChannelMult=2.0 = son devlen.
+;
+; A utiliser pour comparer l'EA a ce que tu vois sur TradingView.
+; Pour trader, prefere InpReg_DevMode=0 (erreur-type).
+InpEngine=1
+InpMagic=770105
+InpComment=QueuPine-XAU
 InpTimeframe=16385
 InpSlippagePoints=30
 InpShowPanel=true
@@ -35,13 +46,13 @@ InpUseBreakEven=true
 InpBE_ATR=1.0
 InpBE_LockATR=0.10
 InpUseTrailing=true
-InpTrail_ATR=2.0
+InpTrail_ATR=2.5
 InpTrailStepPoints=20.0
-InpReg_BasePeriod=20
+InpReg_BasePeriod=25
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35
 InpReg_MinSlopeATR=1.00
-InpReg_DevMode=0
+InpReg_DevMode=2
 InpReg_EntrySigma=1.00
 InpReg_StopSigma=2.50
 InpReg_RequireAboveLong=true

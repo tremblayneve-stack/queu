@@ -1,8 +1,6 @@
 ; QueuBreakoutEA - XAUUSD H1, moteur CHAINE DE REGRESSIONS.
-; Achete le repli en tendance, la ou le moteur de cassure achete la
-; cassure : les deux ne se declenchent pas aux memes moments.
-; Regime lu sur les echelons 2N/4N/8N ; l'echelon N sert au timing et
-; au stop via sigma. Magic distinct : peut tourner en parallele.
+; Achete le repli en tendance. Dispersion = erreur-type statistique.
+; Magic distinct : peut tourner en parallele du moteur de cassure.
 InpEngine=1
 InpMagic=770103
 InpComment=QueuReg-XAU
@@ -43,10 +41,13 @@ InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35
 InpReg_MinSlopeATR=1.00
+InpReg_DevMode=0
 InpReg_EntrySigma=1.00
 InpReg_StopSigma=2.50
 InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
+InpReg_ExitOnChannel=true
+InpReg_ChannelMult=2.00
 InpUseERFilter=true
 InpERPeriod=20
 InpERMin=0.30

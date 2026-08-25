@@ -1,7 +1,5 @@
 ; QueuBreakoutEA - BTCUSD H1, moteur CASSURE de canal Donchian.
-; Stops et marge de cassure elargis : le bruit intra-bougie du BTC fait
-; sortir un stop a 2 ATR beaucoup plus souvent que sur l'or.
-; Filtre de tendance en H4 : le H1 du BTC change de regime trop souvent.
+; Stops et marge de cassure elargis, filtre de tendance en H4.
 InpEngine=0
 InpMagic=770102
 InpComment=QueuBrk-BTC
@@ -42,10 +40,13 @@ InpReg_BasePeriod=20
 InpReg_RegimeFrom=1
 InpReg_MinR2=0.35
 InpReg_MinSlopeATR=1.00
+InpReg_DevMode=0
 InpReg_EntrySigma=1.00
 InpReg_StopSigma=2.50
 InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
+InpReg_ExitOnChannel=true
+InpReg_ChannelMult=2.00
 InpUseERFilter=true
 InpERPeriod=20
 InpERMin=0.35

@@ -152,6 +152,64 @@ chaîne fait déjà ce travail, avec ses seuils de R² et de pente. Les empiler
 serait redondant et sur-filtrerait. Les filtres de **coût** (spread, ATR
 minimum) et tous les garde-fous de risque restent actifs.
 
+### Rapport avec le « Linear Regression Channel » de LonesomeTheBlue
+
+L'indicateur Pine bien connu de TradingView calcule la même droite. Vérification
+faite ligne par ligne :
+
+- **Pente et intercept : OLS exact, identiques aux miens.** Sa formule
+  `mid − slope·floor(len/2) + ((1−len%2)/2)·slope` se réduit exactement à
+  `mid − slope·(len−1)/2` — le correctif de parité gère simplement les longueurs
+  paires et impaires. Écart mesuré : 1,4 × 10⁻¹⁶.
+- **La dispersion diffère.** Sa boucle prédit `slope·(len−x) + intercept` pour la
+  bougie `x`, alors que la droite y vaut `intercept + slope·(len−1−x)`. Chaque
+  résidu est donc décalé de exactement `−slope`, ce qui donne l'identité
+  (vérifiée numériquement à 3 × 10⁻¹⁴) :
+
+```
+dev_Pine = √(SSres/n + pente²)      au lieu de      σ = √(SSres/(n−2))
+```
+
+Conséquence concrète :
+
+| Série | `dev` Pine | Dispersion réelle | Écart |
+|---|---|---|---|
+| Bruit fort, pente faible | 3,141 | 3,141 | négligeable |
+| Bruit faible, **pente forte** | 1,557 | 0,414 | **× 3,8** |
+| **Droite parfaite** | 2,000 | **0,000** | le canal ne se referme jamais |
+
+La largeur du canal se trouve mélangée à la pente. Ce n'est pas nécessairement
+à « corriger » — ça évite les canaux dégénérés de largeur nulle — mais ce n'est
+pas une mesure de dispersion. `InpReg_DevMode` laisse le choix :
+
+| Mode | Formule | Usage |
+|---|---|---|
+| `QREG_DEV_STDERR` (défaut) | √(SSres/(n−2)) | trading — estimateur standard |
+| `QREG_DEV_POP` | √(SSres/n) | écart-type de population |
+| `QREG_DEV_PINE` | √(SSres/n + pente²) | **parité visuelle** avec TradingView |
+
+Le preset `QueuRegression_XAUUSD_PineParity.set` active le mode PINE avec
+`InpReg_BasePeriod=25` (échelons 25/50/**100**/200 — 100 est la longueur par
+défaut de l'indicateur) et `InpReg_ChannelMult=2.0` (son `devlen`). Utilise-le
+pour comparer l'EA à ce que tu vois sur ton graphique ; pour trader, reste en
+mode erreur-type.
+
+### La contradiction apparente sur `outofchannel`, et sa résolution
+
+L'indicateur signale une **rupture** quand le prix sort du canal par le bas en
+tendance haussière. C'est exactement ma condition d'**entrée**. Contradiction ?
+Non — différence d'échelle, et c'est le cœur de l'intérêt d'une chaîne :
+
+| Situation | Lecture |
+|---|---|
+| Prix sous le canal **court**, échelons longs toujours d'accord | **respiration** → on achète |
+| Prix sort du canal **long** (`InpReg_ExitOnChannel`) | **vraie rupture** → on sort |
+
+Un indicateur à canal unique ne peut pas faire cette distinction : il n'a qu'une
+échelle. C'est précisément ce que la chaîne apporte. L'EA transpose donc son
+`outofchannel` fidèlement, mais l'applique à l'échelon **long** comme condition
+de sortie, `InpReg_ChannelMult` jouant le rôle de son `devlen`.
+
 ### Validation
 
 Les formules OLS ont été vérifiées contre une implémentation de référence à
@@ -355,6 +413,7 @@ L'outil affiche les deux valeurs exactes à recopier.
 | `QueuBreakoutEA_BTCUSD_H1.set` | BTCUSD H1 | **Cassure.** 24/7 sauf week-end, tendance H4, stops 2,5 ATR, marge 0,15 ATR, risque 0,35 % |
 | `QueuRegression_XAUUSD_H1.set` | XAUUSD H1 | **Régression.** N=20, R² ≥ 0,35, repli 1,0 σ, stop 2,5 σ, magic 770103 |
 | `QueuRegression_BTCUSD_H1.set` | BTCUSD H1 | **Régression.** N=24, R² ≥ 0,30, repli 1,2 σ, stop 3,0 σ, magic 770104 |
+| `QueuRegression_XAUUSD_PineParity.set` | XAUUSD H1 | **Parité TradingView.** Mode PINE, échelons 25/50/100/200, `devlen`=2, magic 770105 |
 
 Les magic numbers des presets de régression sont distincts : les deux moteurs
 peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.

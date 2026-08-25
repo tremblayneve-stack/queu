@@ -23,6 +23,34 @@
 
 #define QUEU_REG_RUNGS 4
 
+//--- etat d'un canal vis-a-vis du prix
+#define QREG_CHANNEL_INTACT        0
+#define QREG_CHANNEL_BROKEN_DOWN  -1   // pente haussiere, prix sous la bande basse
+#define QREG_CHANNEL_BROKEN_UP     1   // pente baissiere, prix au-dessus de la bande haute
+
+//+------------------------------------------------------------------+
+//| Mesure de dispersion utilisee pour la largeur du canal.           |
+//|                                                                   |
+//| STDERR est l'erreur-type de la regression, l'estimateur standard  |
+//| qui tient compte des deux parametres estimes.                     |
+//|                                                                   |
+//| PINE reproduit le "Linear Regression Channel" de LonesomeTheBlue. |
+//| Sa boucle evalue la droite avec un decalage d'une bougie, ce qui  |
+//| decale chaque residu de -pente et donne exactement                |
+//|     dev = sqrt(SSres/n + pente^2)                                 |
+//| La largeur du canal se trouve donc melangee a la pente : sur une  |
+//| tendance propre et raide les bandes sont nettement plus larges    |
+//| que la dispersion reelle, et sur une droite parfaite le canal     |
+//| conserve une largeur de |pente| au lieu de se refermer.           |
+//| A n'utiliser que pour coller visuellement a l'indicateur.          |
+//+------------------------------------------------------------------+
+enum ENUM_QREG_DEV
+  {
+   QREG_DEV_STDERR = 0,   // Erreur-type sqrt(SSres/(n-2)) - recommande
+   QREG_DEV_POP    = 1,   // Ecart-type de population sqrt(SSres/n)
+   QREG_DEV_PINE   = 2    // Compatible LonesomeTheBlue sqrt(SSres/n + pente^2)
+  };
+
 //+------------------------------------------------------------------+
 //| Resultat d'une regression sur une fenetre.                        |
 //+------------------------------------------------------------------+
@@ -34,6 +62,8 @@ struct QRegResult
    double            intercept;
    double            r2;          // dans [0, 1]
    double            sigma;       // erreur-type des residus, en prix
+   double            devPop;      // ecart-type de population des residus
+   double            devPine;     // dispersion au sens du script Pine
    double            value;       // droite evaluee sur la bougie la plus recente
    double            slopeATR;    // pente normalisee : ATR parcourus par fenetre
   };
@@ -58,6 +88,8 @@ bool QRegress(const string sym, const ENUM_TIMEFRAMES tf,
    out.intercept = 0.0;
    out.r2        = 0.0;
    out.sigma     = 0.0;
+   out.devPop    = 0.0;
+   out.devPine   = 0.0;
    out.value     = 0.0;
    out.slopeATR  = 0.0;
 
@@ -101,8 +133,14 @@ bool QRegress(const string sym, const ENUM_TIMEFRAMES tf,
    if(ssres < 0.0)
       ssres = 0.0;                       // garde-fou contre l'erreur d'arrondi
 
-   out.r2    = (syy > 0.0) ? 1.0 - ssres / syy : 0.0;
-   out.sigma = (n > 2) ? MathSqrt(ssres / (dn - 2.0)) : 0.0;
+   out.r2     = (syy > 0.0) ? 1.0 - ssres / syy : 0.0;
+   out.sigma  = (n > 2) ? MathSqrt(ssres / (dn - 2.0)) : 0.0;
+   out.devPop = MathSqrt(ssres / dn);
+
+   //--- forme fermee de la dispersion du script Pine : les residus y sont
+   //--- tous decales de -pente, d'ou le terme en pente^2. Verifie
+   //--- numeriquement contre le portage fidele de sa boucle.
+   out.devPine = MathSqrt(ssres / dn + out.slope * out.slope);
 
    if(out.r2 < 0.0)
       out.r2 = 0.0;
@@ -187,6 +225,50 @@ int QRegChainBias(const QRegChain &chain, const int from,
       return 0;
 
    return sign;
+  }
+
+//+------------------------------------------------------------------+
+//| Dispersion selon le mode choisi.                                  |
+//+------------------------------------------------------------------+
+double QRegDev(const QRegResult &r, const ENUM_QREG_DEV mode)
+  {
+   if(!r.valid)
+      return 0.0;
+
+   switch(mode)
+     {
+      case QREG_DEV_POP:
+         return r.devPop;
+      case QREG_DEV_PINE:
+         return r.devPine;
+      default:
+         return r.sigma;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Etat du canal, transposition directe de 'outofchannel' du script. |
+//|                                                                   |
+//| Le script signale une cassure quand le prix quitte le canal DU    |
+//| MAUVAIS COTE : sous la bande basse en tendance haussiere, ou      |
+//| au-dessus de la bande haute en tendance baissiere.                |
+//+------------------------------------------------------------------+
+int QRegChannelBreak(const QRegResult &r, const double close,
+                     const double mult, const ENUM_QREG_DEV mode)
+  {
+   if(!r.valid || close <= 0.0)
+      return QREG_CHANNEL_INTACT;
+
+   double band = QRegDev(r, mode) * mult;
+   if(band <= 0.0)
+      return QREG_CHANNEL_INTACT;
+
+   if(r.slope > 0.0 && close < r.value - band)
+      return QREG_CHANNEL_BROKEN_DOWN;
+   if(r.slope < 0.0 && close > r.value + band)
+      return QREG_CHANNEL_BROKEN_UP;
+
+   return QREG_CHANNEL_INTACT;
   }
 
 #endif // QUEU_REGRESSION_MQH

@@ -89,10 +89,13 @@ input int             InpReg_BasePeriod     = 20;        // Echelon court N (les
 input int             InpReg_RegimeFrom     = 1;         // Premier echelon du regime (0=N, 1=2N...)
 input double          InpReg_MinR2          = 0.35;      // R2 minimum de l'echelon long
 input double          InpReg_MinSlopeATR    = 1.00;      // Pente min de l'echelon long (ATR/fenetre)
+input ENUM_QREG_DEV   InpReg_DevMode        = QREG_DEV_STDERR; // Mesure de dispersion (PINE = parite LonesomeTheBlue)
 input double          InpReg_EntrySigma     = 1.00;      // Repli requis sous la droite courte (x sigma)
 input double          InpReg_StopSigma      = 2.50;      // Stop a x sigma de la droite courte
 input bool            InpReg_RequireAboveLong = true;    // Exiger le prix du bon cote de l'echelon long
-input bool            InpReg_ExitOnBreak    = true;      // Sortir si le regime se casse
+input bool            InpReg_ExitOnBreak    = true;      // Sortir si le regime se casse (desaccord de pente)
+input bool            InpReg_ExitOnChannel  = true;      // Sortir si le canal LONG est casse
+input double          InpReg_ChannelMult    = 2.00;      // Largeur du canal long (x dispersion)
 
 input group "=== Qualite du signal ==="
 input bool            InpUseERFilter        = true;      // Filtre ratio d'efficience (Kaufman)
@@ -726,14 +729,17 @@ bool RegressionSignal(const double atr, int &dir, double &slDist)
    QRegResult shortRung = chain.rung[0];
    QRegResult longRung  = chain.rung[QUEU_REG_RUNGS - 1];
 
-   if(shortRung.sigma <= 0.0)
+   //--- la dispersion du timing suit le mode choisi : sigma statistique,
+   //--- ecart-type de population, ou parite avec l'indicateur Pine
+   double dev = QRegDev(shortRung, InpReg_DevMode);
+   if(dev <= 0.0)
       return false;
 
    double close1 = iClose(g_sym, g_tf, 1);
    if(close1 <= 0.0)
       return false;
 
-   double offset = InpReg_EntrySigma * shortRung.sigma;
+   double offset = InpReg_EntrySigma * dev;
    double stopPx = 0.0;
 
    if(regime > 0)
@@ -757,7 +763,7 @@ bool RegressionSignal(const double atr, int &dir, double &slDist)
          return false;
         }
 
-      stopPx = shortRung.value - InpReg_StopSigma * shortRung.sigma;
+      stopPx = shortRung.value - InpReg_StopSigma * dev;
       slDist = close1 - stopPx;
       dir    = 1;
      }
@@ -778,7 +784,7 @@ bool RegressionSignal(const double atr, int &dir, double &slDist)
          return false;
         }
 
-      stopPx = shortRung.value + InpReg_StopSigma * shortRung.sigma;
+      stopPx = shortRung.value + InpReg_StopSigma * dev;
       slDist = stopPx - close1;
       dir    = -1;
      }
@@ -805,7 +811,9 @@ bool RegressionSignal(const double atr, int &dir, double &slDist)
 //+------------------------------------------------------------------+
 void CheckRegimeExit(const double atr)
   {
-   if(!InpReg_ExitOnBreak || InpEngine == QUEU_ENGINE_BREAKOUT)
+   if(InpEngine == QUEU_ENGINE_BREAKOUT)
+      return;
+   if(!InpReg_ExitOnBreak && !InpReg_ExitOnChannel)
       return;
    if(CountOwnPositions() == 0)
       return;
@@ -816,10 +824,36 @@ void CheckRegimeExit(const double atr)
 
    int regime = QRegChainBias(chain, InpReg_RegimeFrom, 0.0, 0.0);
 
-   if(regime <= 0)
-      CloseDirection(POSITION_TYPE_BUY);
-   if(regime >= 0)
-      CloseDirection(POSITION_TYPE_SELL);
+   if(InpReg_ExitOnBreak)
+     {
+      if(regime <= 0)
+         CloseDirection(POSITION_TYPE_BUY);
+      if(regime >= 0)
+         CloseDirection(POSITION_TYPE_SELL);
+     }
+
+   //--- Cassure du canal, au sens de 'outofchannel' du script Pine, mais
+   //--- lue sur l'echelon LONG et non sur le court.
+   //---
+   //--- C'est la reconciliation d'une contradiction apparente : sortir du
+   //--- canal par le bas dans une tendance haussiere est, pour un canal
+   //--- unique, un signal de rupture. Ici c'est justement la condition
+   //--- d'ENTREE, mesuree sur l'echelon court. La difference est l'echelle :
+   //--- un repli sous le canal court pendant que les echelons longs tiennent
+   //--- est une respiration ; une sortie du canal LONG est une vraie
+   //--- rupture de tendance. Un indicateur a canal unique ne peut pas faire
+   //--- cette distinction.
+   if(InpReg_ExitOnChannel)
+     {
+      double close1 = iClose(g_sym, g_tf, 1);
+      int    brk    = QRegChannelBreak(chain.rung[QUEU_REG_RUNGS - 1], close1,
+                                       InpReg_ChannelMult, InpReg_DevMode);
+
+      if(brk == QREG_CHANNEL_BROKEN_DOWN)
+         CloseDirection(POSITION_TYPE_BUY);
+      if(brk == QREG_CHANNEL_BROKEN_UP)
+         CloseDirection(POSITION_TYPE_SELL);
+     }
   }
 
 //+------------------------------------------------------------------+
@@ -885,11 +919,12 @@ void UpdatePanel(const double atr)
       if(QRegChainCompute(g_sym, g_tf, InpReg_BasePeriod, 1, atr, c))
         {
          int rg = QRegChainBias(c, InpReg_RegimeFrom, InpReg_MinSlopeATR, InpReg_MinR2);
-         reg = StringFormat("%s  R2=%.2f  pente=%+.2f ATR/fen.  sigma=%.5f",
+         reg = StringFormat("%s  R2=%.2f  pente=%+.2f ATR/fen.  dev=%.5f (%s)",
                             (rg > 0 ? "HAUSSIER" : (rg < 0 ? "BAISSIER" : "aucun")),
                             c.rung[QUEU_REG_RUNGS - 1].r2,
                             c.rung[QUEU_REG_RUNGS - 1].slopeATR,
-                            c.rung[0].sigma);
+                            QRegDev(c.rung[0], InpReg_DevMode),
+                            EnumToString(InpReg_DevMode));
         }
       else
          reg = "historique insuffisant";
