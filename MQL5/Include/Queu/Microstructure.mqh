@@ -299,6 +299,29 @@ public:
       out.valid = true;
       return true;
      }
+
+   //+---------------------------------------------------------------+
+   //| Extremes du mid sur la fenetre, en prix.                       |
+   //|                                                                |
+   //| Balayage lineaire assume : cette methode n'est appelee QUE lors |
+   //| de la formation d'un candidat, evenement rare, jamais a chaque  |
+   //| tick. Maintenir un minimum et un maximum glissants exacts       |
+   //| exigerait deux deques monotones pour un gain nul ici.           |
+   //+---------------------------------------------------------------+
+   bool              Extremes(double &lo, double &hi) const
+     {
+      if(m_count < 2)
+         return false;
+
+      lo = hi = m_mid[Idx(0)];
+      for(int b = 1; b < m_count; b++)
+        {
+         double v = m_mid[Idx(b)];
+         if(v < lo) lo = v;
+         if(v > hi) hi = v;
+        }
+      return true;
+     }
   };
 
 #endif // QUEU_MICROSTRUCTURE_MQH

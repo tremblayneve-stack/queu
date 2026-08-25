@@ -439,6 +439,70 @@ permanente. Corrigé et revérifié sur 41 points de contrôle.
 
 ---
 
+## Moteur 5 — micro-scalping, et la discipline de recherche qui va avec
+
+### Le défaut que corrige ce moteur
+
+Un journal de trades ne contient que les signaux ayant **survécu aux filtres**.
+Impossible d'y mesurer si un veto aide ou nuit : on n'observe que ses survivants.
+C'est un biais de sélection que l'on s'inflige à soi-même.
+
+`Research.mqh` enregistre donc **chaque candidat, pris ou rejeté**, avec ses
+14 features, le masque des veto qui l'ont bloqué, et son résultat forcé par
+**triple barrière** (cible / stop / temps — l'étiquette qui correspond à la
+géométrie réelle d'un trade, contrairement à un rendement à horizon fixe).
+
+Quand les deux barrières de prix sont franchies dans la même bougie, l'ordre est
+indéterminable : on retient le stop — choix pessimiste — et la ligne est marquée
+`ambiguous` pour pouvoir être filtrée à l'analyse.
+
+### Les quatre couches
+
+| Couche | Contenu |
+|---|---|
+| 0 — état micro | bande de ticks glissante à **coût constant** : sommes entretenues au fil de l'eau, aucun `CopyTicks` en boucle, aucun tri par tick |
+| 1 — déséquilibre | **fade d'absorption** (pression orientée, prix immobile → on se place contre) et **continuation après épuisement** (cascade nette puis inversion de la pression → premier repli) |
+| 2/3 — veto | toxicité, spread, régime de bruit, mémoire de douleur, cadence, structure M15, rentabilité, positions, garde journalier |
+| 4 — risque | silence forcé après N pertes en M minutes, time-stop, sortie forcée sur pic de toxicité ou écartement du spread |
+
+### `tools/research_micro.py` — ce que fait une équipe quant
+
+```bash
+python3 tools/research_micro.py Queu_Candidates_BTCUSD_770110.csv 60
+```
+
+1. **Couverture** — combien de candidats, combien pris, part d'étiquettes ambiguës
+2. **Efficacité de chaque veto** — compare le R des candidats qu'il a bloqués à
+   celui des autres, avec un **test de Welch**. En dessous de |t| = 2, l'outil
+   refuse de conclure : un écart de 0,002 n'est pas un résultat.
+3. **Information Coefficient par feature**, pondéré par l'**unicité des
+   étiquettes** et assorti d'un **effectif effectif de Kish**. Des étiquettes qui
+   se chevauchent dans le temps gonflent toute significativité ; sans cette
+   correction, le t-stat ment.
+4. **Validation croisée purgée avec embargo** — on retire de l'entraînement tout
+   échantillon dont la fenêtre d'étiquette chevauche le pli de test. Sans purge,
+   l'information fuit du test vers l'entraînement et tout paraît fonctionner.
+
+L'outil a été validé sur des données synthétiques contenant un signal connu et
+un veto délibérément inutile : il retrouve le signal (IC +0,17, t=+5,8 ; positif
+sur 4/4 plis en validation purgée), classe correctement le veto utile (t=+7,1) et
+**refuse de conclure** sur les deux veto qui ne faisaient que du bruit.
+
+### Ordre d'exécution
+
+| # | Étape | Répond à |
+|---|---|---|
+| 1 | `QueuBrokerAudit.mq5` | le flux permet-il quoi que ce soit ? |
+| 2 | `tools/scalp_breakeven.py` | le coût permet-il de scalper ? |
+| 3 | Backtest ticks réels, `InpMS_LogCandidates=true` | produire les candidats |
+| 4 | `tools/research_micro.py` | **quelles features portent un signal** |
+
+**Ne pas optimiser les seuils avant l'étape 4.** Sans savoir quelles features
+portent quelque chose, optimiser ne fait que sur-apprendre — et le critère
+déflaté de la section suivante le confirmera trop tard.
+
+---
+
 ## Ce qui améliore réellement le rendement
 
 ### 1. Le critère d'optimisation (levier principal)
@@ -636,6 +700,7 @@ L'outil affiche les deux valeurs exactes à recopier.
 | `QueuMeanRev_BTCUSD_M1.set` | BTCUSD **M1** | **Retour à la moyenne.** N=60, mêmes seuils, week-end exclu, magic 770107 |
 | `QueuReversal_XAUUSD_M1.set` | XAUUSD **M1** | **Retournement.** M3/M5 épuisés, rebond confirmé, D=1 S=2 T=+1, magic 770108 |
 | `QueuReversal_BTCUSD_M1.set` | BTCUSD **M1** | **Retournement.** N=60, risque 0,15 %, week-end exclu, magic 770109 |
+| `QueuMicro_BTCUSD_M1.set` | BTCUSD **M1** | **Micro-scalping.** Proxys de microstructure, log des candidats actif, risque 0,15 %, magic 770110 |
 
 Les magic numbers des presets de régression sont distincts : les deux moteurs
 peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.

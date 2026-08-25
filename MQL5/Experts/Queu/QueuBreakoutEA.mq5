@@ -19,6 +19,8 @@
 #include <Queu/Risk.mqh>
 #include <Queu/Stats.mqh>
 #include <Queu/Regression.mqh>
+#include <Queu/Microstructure.mqh>
+#include <Queu/Research.mqh>
 #include <Queu/Journal.mqh>
 
 //+------------------------------------------------------------------+
@@ -35,7 +37,8 @@ enum ENUM_QUEU_ENGINE
    QUEU_ENGINE_REGRESSION = 1,   // Chaine de regressions : repli en tendance
    QUEU_ENGINE_BOTH       = 2,   // Cassure + regression (premier signal servi)
    QUEU_ENGINE_MEANREV    = 3,   // Retour a la moyenne en canal, confirme multi-horizon
-   QUEU_ENGINE_REVERSAL   = 4    // Retournement : lents epuises, rapide deja retourne
+   QUEU_ENGINE_REVERSAL   = 4,   // Retournement : lents epuises, rapide deja retourne
+   QUEU_ENGINE_MICRO      = 5    // Micro-scalping sur proxys de microstructure
   };
 
 input group "=== General ==="
@@ -102,6 +105,46 @@ input double          InpMR_MaxPosInChannel = 0.50;      // Place restante max d
 input double          InpMR_ConfirmMinSlope = 0.50;      // Pente min des horizons lents, ATR/fenetre (mode 4)
 input double          InpMR_MaxBreakeven    = 60.0;      // Refus si le p* requis depasse ce %
 input double          InpMR_CostPoints      = 0.0;       // Cout aller-retour additionnel (points)
+
+input group "=== Micro-scalping : bande de ticks ==="
+input int             InpMS_WindowSec       = 60;        // Fenetre d'observation (secondes)
+input int             InpMS_Capacity        = 4096;      // Capacite du tampon de ticks
+input int             InpMS_SpreadEmaTicks  = 500;       // Lissage du spread de reference
+input int             InpMS_MinTicks        = 40;        // Ticks min avant de statuer
+
+input group "=== Micro-scalping : signaux (couche 1) ==="
+input bool            InpMS_UseAbsorption   = true;      // Fade d'absorption
+input bool            InpMS_UseContinuation = true;      // Continuation apres epuisement
+input double          InpMS_AbsMin          = 0.45;      // Absorption minimale [0,1]
+input double          InpMS_PressMin        = 0.30;      // Pression de cotation min |.| [0,1]
+input double          InpMS_EffMax          = 0.25;      // Efficience MAX pour une absorption
+input double          InpMS_CascadeEffMin   = 0.55;      // Efficience MIN d'une cascade
+input double          InpMS_CascadeMoveATR  = 1.00;      // Deplacement min de la cascade (x ATR)
+
+input group "=== Micro-scalping : veto (couches 2 et 3) ==="
+input double          InpMS_ToxMax          = 0.60;      // Toxicite max toleree [0,1]
+input double          InpMS_ToxSpreadRatio  = 2.50;      // Ratio de spread valant toxicite 1.0
+input int             InpMS_ToxGapMsc       = 5000;      // Silence valant toxicite 1.0 (ms)
+input double          InpMS_SpreadMaxPts    = 0.0;       // Plafond absolu de spread (0 = off)
+input double          InpMS_TickRateMin     = 0.50;      // Cadence min (ticks/seconde)
+input ENUM_TIMEFRAMES InpMS_ContextTF       = PERIOD_M15;// Structure de contexte
+input int             InpMS_ContextPeriod   = 50;        // Longueur de regression du contexte
+input double          InpMS_ContextSlopeMax = 2.00;      // Pente au-dela de laquelle on n'y va pas contre
+
+input group "=== Micro-scalping : geometrie et sorties ==="
+input double          InpMS_StopBufferATR   = 0.25;      // Marge derriere la zone (x ATR)
+input double          InpMS_TargetR         = 1.30;      // k : cible en multiples de R
+input int             InpMS_TimeStopBars    = 10;        // Time-stop et barriere temporelle
+input double          InpMS_MaxBreakeven    = 62.0;      // Refus si p* requis depasse ce %
+input double          InpMS_ExitToxicity    = 0.80;      // Sortie forcee au-dela de cette toxicite
+
+input group "=== Micro-scalping : silence force (couche 4) ==="
+input int             InpMS_PainLosses      = 3;         // Pertes declenchant le silence
+input int             InpMS_PainWindowMin   = 30;        // Fenetre de comptage (minutes)
+input int             InpMS_SilenceMin      = 45;        // Duree du silence (minutes)
+
+input group "=== Micro-scalping : recherche ==="
+input bool            InpMS_LogCandidates   = true;      // Journaliser AUSSI les candidats rejetes
 
 input group "=== Retournement sur epuisement (multi-horizon) ==="
 input int             InpRV_Period          = 50;        // Longueur de regression (toutes echelles)
@@ -188,6 +231,13 @@ int      g_hATR      = INVALID_HANDLE;
 int      g_hEmaFast  = INVALID_HANDLE;
 int      g_hEmaSlow  = INVALID_HANDLE;
 int      g_hADX      = INVALID_HANDLE;
+CQMicroTape g_tape;
+CQResearch  g_research;
+datetime    g_msLossTimes[];
+datetime    g_msSilenceUntil = 0;
+int         g_msLastVeto     = 0;
+long        g_msCandidateId  = 0;
+
 int      g_hATR_TF1  = INVALID_HANDLE;   // ATR des horizons lents, pour normaliser
 int      g_hATR_TF2  = INVALID_HANDLE;   // les pentes du mode QMR_CONFIRM_SLOPE
 
@@ -1379,6 +1429,300 @@ bool ReversalSignal(const double atr, int &dir, double &slDist, double &tpDist)
   }
 
 //+------------------------------------------------------------------+
+//| Memoire de douleur : enregistre une cloture perdante.             |
+//+------------------------------------------------------------------+
+void MicroPushLoss(const datetime when)
+  {
+   int n = ArraySize(g_msLossTimes);
+   ArrayResize(g_msLossTimes, n + 1);
+   g_msLossTimes[n] = when;
+
+   //--- compte les pertes dans la fenetre glissante
+   datetime cutoff = when - (datetime)(InpMS_PainWindowMin * 60);
+   int recent = 0;
+   for(int i = 0; i < ArraySize(g_msLossTimes); i++)
+      if(g_msLossTimes[i] >= cutoff)
+         recent++;
+
+   if(InpMS_PainLosses > 0 && recent >= InpMS_PainLosses)
+     {
+      g_msSilenceUntil = when + (datetime)(InpMS_SilenceMin * 60);
+      PrintFormat("[Queu] Silence force : %d pertes en %d min. Observation pure "
+                  "jusqu'a %s.", recent, InpMS_PainWindowMin,
+                  TimeToString(g_msSilenceUntil, TIME_DATE | TIME_MINUTES));
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Regression de contexte (M15 par defaut).                          |
+//+------------------------------------------------------------------+
+bool MicroContext(QRegResult &out)
+  {
+   double atrCtx = 0.0;
+   if(g_hATR_TF1 != INVALID_HANDLE)
+      CopyOne(g_hATR_TF1, 0, 1, atrCtx);
+
+   return QRegress(g_sym, InpMS_ContextTF, InpMS_ContextPeriod, 1, atrCtx, out);
+  }
+
+//+------------------------------------------------------------------+
+//| Couches 2 et 3 — masque des veto. Zero signifie « rien ne bloque ».|
+//|                                                                   |
+//| Le masque est conserve MEME quand le trade est refuse : c'est lui |
+//| qui permettra plus tard de mesurer si chaque veto ameliore ou     |
+//| degrade le resultat, en comparant les candidats bloques a ceux    |
+//| qui sont passes.                                                   |
+//+------------------------------------------------------------------+
+int MicroVetoMask(const QMicroState &st, const int dir, const double stopDist,
+                  const double cost)
+  {
+   int mask = QVETO_NONE;
+
+   if(InpMS_ToxMax > 0.0 && st.toxicity > InpMS_ToxMax)
+      mask |= QVETO_TOXICITY;
+
+   if(InpMS_SpreadMaxPts > 0.0 && st.spreadNow > InpMS_SpreadMaxPts)
+      mask |= QVETO_SPREAD;
+
+   //--- au-dela d'une inversion sur deux, le regime est du bruit pur
+   if(st.flicker > 0.5)
+      mask |= QVETO_FLICKER;
+
+   if(g_msSilenceUntil > 0 && TimeCurrent() < g_msSilenceUntil)
+      mask |= QVETO_PAIN;
+
+   if(InpMS_TickRateMin > 0.0 && st.tickRate < InpMS_TickRateMin)
+      mask |= QVETO_TICKRATE;
+
+   //--- structure de contexte : on n'affronte pas une pente trop forte
+   QRegResult ctx;
+   if(InpMS_ContextSlopeMax > 0.0 && MicroContext(ctx) && ctx.valid)
+     {
+      bool against = (dir > 0 && ctx.slopeATR < 0.0) || (dir < 0 && ctx.slopeATR > 0.0);
+      if(against && MathAbs(ctx.slopeATR) > InpMS_ContextSlopeMax)
+         mask |= QVETO_CONTEXT;
+     }
+
+   //--- rentabilite : la cible couvre-t-elle seulement le cout ?
+   if(InpMS_MaxBreakeven > 0.0 && stopDist > 0.0)
+     {
+      double f  = cost / stopDist;
+      double be = (1.0 + f) / (InpMS_TargetR + 1.0) * 100.0;
+      if(be > InpMS_MaxBreakeven)
+         mask |= QVETO_BREAKEVEN;
+     }
+
+   if(CountOwnPositions() >= InpMaxPositions)
+      mask |= QVETO_POSITIONS;
+
+   if(g_guard.Halted())
+      mask |= QVETO_SESSION;
+
+   return mask;
+  }
+
+//+------------------------------------------------------------------+
+//| Moteur 5 — micro-scalping sur proxys de microstructure.           |
+//|                                                                   |
+//| Deux formes de desequilibre, toutes deux lues sur la bande de     |
+//| ticks (voir l'avertissement de nommage de Microstructure.mqh :    |
+//| ce sont des proxys de cotation, pas du flux d'ordres) :           |
+//|                                                                   |
+//|  1. FADE D'ABSORPTION — la pression de cotation est fortement     |
+//|     orientee mais le prix n'avance pas. Quelque chose encaisse.   |
+//|     On se place CONTRE la pression, stop derriere l'extreme.      |
+//|                                                                   |
+//|  2. CONTINUATION APRES EPUISEMENT — une cascade directionnelle    |
+//|     nette vient d'avoir lieu, puis la pression s'inverse : c'est  |
+//|     le premier repli. On se place DANS le sens de la cascade.     |
+//|                                                                   |
+//| Le candidat est journalise dans TOUS LES CAS, veto compris. Un    |
+//| journal qui ne contient que les trades pris ne peut rien dire de  |
+//| la qualite des filtres : on n'y observe que leurs survivants.     |
+//+------------------------------------------------------------------+
+bool MicroSignal(const double atr, int &dir, double &slDist, double &tpDist)
+  {
+   dir    = 0;
+   slDist = 0.0;
+   tpDist = 0.0;
+   g_msLastVeto = 0;
+
+   QMicroState st;
+   if(!g_tape.State(st, InpMS_MinTicks, InpMS_ToxSpreadRatio, (long)InpMS_ToxGapMsc))
+     {
+      g_blockReason = "bande de ticks insuffisante";
+      return false;
+     }
+
+   double point = SymbolInfoDouble(g_sym, SYMBOL_POINT);
+   if(point <= 0.0 || atr <= 0.0)
+      return false;
+
+   //--- couche 1 : le desequilibre existe-t-il ?
+   int    cand = 0;
+   int    kind = 0;
+   double atrPts = atr / point;
+
+   if(InpMS_UseAbsorption &&
+      st.absorption >= InpMS_AbsMin &&
+      MathAbs(st.quotePressure) >= InpMS_PressMin &&
+      st.efficiency <= InpMS_EffMax)
+     {
+      //--- on se place CONTRE la pression qui se fait absorber
+      cand = (st.quotePressure > 0.0) ? -1 : 1;
+      kind = 1;
+     }
+   else
+      if(InpMS_UseContinuation &&
+         st.efficiency >= InpMS_CascadeEffMin &&
+         MathAbs(st.displacement) >= InpMS_CascadeMoveATR * atrPts)
+        {
+         //--- cascade nette, puis premier signe d'epuisement : la pression
+         //--- de cotation s'inverse alors que le deplacement reste oriente
+         int moveDir  = (st.displacement > 0.0) ? 1 : -1;
+         int pressDir = (st.quotePressure > 0.0) ? 1 : ((st.quotePressure < 0.0) ? -1 : 0);
+
+         if(pressDir != 0 && pressDir != moveDir)
+           {
+            cand = moveDir;
+            kind = 2;
+           }
+        }
+
+   if(cand == 0)
+     {
+      g_blockReason = "aucun desequilibre micro";
+      return false;
+     }
+
+   if((cand > 0 && !InpAllowLong) || (cand < 0 && !InpAllowShort))
+      return false;
+
+   //--- geometrie : le stop se place derriere la zone observee
+   double lo, hi;
+   if(!g_tape.Extremes(lo, hi))
+      return false;
+
+   double buffer = InpMS_StopBufferATR * atr;
+   double bid    = SymbolInfoDouble(g_sym, SYMBOL_BID);
+   double ask    = SymbolInfoDouble(g_sym, SYMBOL_ASK);
+   double entry  = (cand > 0) ? ask : bid;
+   if(entry <= 0.0)
+      return false;
+
+   double stopPx = (cand > 0) ? lo - buffer : hi + buffer;
+   double dist   = (cand > 0) ? entry - stopPx : stopPx - entry;
+
+   double minDist = QMinStopDistance(g_sym);
+   if(dist < minDist)
+      dist = minDist;
+   if(dist <= 0.0)
+      return false;
+
+   double cost = (ask - bid) + InpMR_CostPoints * point;
+
+   //--- couches 2 et 3
+   int mask = MicroVetoMask(st, cand, dist, cost);
+   g_msLastVeto = mask;
+
+   //--- journal de recherche : le candidat part quoi qu'il arrive
+   if(InpMS_LogCandidates && g_research.Enabled())
+     {
+      QRegResult fast, ctx;
+      QRegress(g_sym, g_tf, InpMS_ContextPeriod, 1, atr, fast);
+      bool haveCtx = MicroContext(ctx);
+
+      QCandidate c;
+      c.opened   = TimeCurrent();
+      c.dir      = cand;
+      c.kind     = kind;
+      c.entry    = entry;
+      c.stopDist = dist;
+      c.tpMult   = InpMS_TargetR;
+      c.maxBars  = InpMS_TimeStopBars;
+      c.taken    = false;
+      c.vetoMask = mask;
+
+      c.f[0]  = st.quotePressure;
+      c.f[1]  = st.absorption;
+      c.f[2]  = st.efficiency;
+      c.f[3]  = st.flicker;
+      c.f[4]  = st.toxicity;
+      c.f[5]  = st.spreadRatio;
+      c.f[6]  = st.spreadNow;
+      c.f[7]  = st.tickRate;
+      c.f[8]  = st.maxGapMsc / 1000.0;
+      c.f[9]  = fast.valid ? fast.r2 : 0.0;
+      c.f[10] = fast.valid ? fast.slopeATR : 0.0;
+      c.f[11] = haveCtx ? ctx.r2 : 0.0;
+      c.f[12] = haveCtx ? ctx.slopeATR : 0.0;
+      c.f[13] = haveCtx ? QRegPositionInChannel(ctx, entry, 2.0, InpReg_DevMode) : 0.5;
+
+      g_msCandidateId = g_research.Add(c);
+     }
+
+   if(mask != QVETO_NONE)
+     {
+      g_blockReason = StringFormat("veto micro 0x%X", mask);
+      return false;
+     }
+
+   dir    = cand;
+   slDist = dist;
+   tpDist = InpMS_TargetR * dist;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Sorties forcees propres au micro-scalping : time-stop, toxicite   |
+//| qui remonte, spread qui s'ecarte.                                  |
+//+------------------------------------------------------------------+
+void MicroManage(void)
+  {
+   if(InpEngine != QUEU_ENGINE_MICRO || CountOwnPositions() == 0)
+      return;
+
+   QMicroState st;
+   bool haveState = g_tape.State(st, InpMS_MinTicks, InpMS_ToxSpreadRatio,
+                                 (long)InpMS_ToxGapMsc);
+
+   bool toxic = haveState && InpMS_ExitToxicity > 0.0 && st.toxicity >= InpMS_ExitToxicity;
+   bool wide  = InpMS_SpreadMaxPts > 0.0 && QSpreadPoints(g_sym) > InpMS_SpreadMaxPts * 1.5;
+
+   int  barSec = PeriodSeconds(g_tf);
+   long maxAge = (long)InpMS_TimeStopBars * (long)MathMax(1, barSec);
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if(PositionGetString(POSITION_SYMBOL) != g_sym)
+         continue;
+      if((ulong)PositionGetInteger(POSITION_MAGIC) != InpMagic)
+         continue;
+
+      long age = (long)(TimeCurrent() - (datetime)PositionGetInteger(POSITION_TIME));
+
+      string why = "";
+      if(toxic)
+         why = StringFormat("toxicite %.2f", st.toxicity);
+      else
+         if(wide)
+            why = StringFormat("spread %.0f pts", QSpreadPoints(g_sym));
+         else
+            if(InpMS_TimeStopBars > 0 && age >= maxAge)
+               why = StringFormat("time-stop %ld s", age);
+
+      if(why == "")
+         continue;
+
+      if(g_trade.PositionClose(ticket))
+         PrintFormat("[Queu] Sortie forcee #%I64u : %s.", ticket, why);
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Evalue le signal sur la bougie qui vient de cloturer.              |
 //+------------------------------------------------------------------+
 void EvaluateSignal(const double atr)
@@ -1388,6 +1732,11 @@ void EvaluateSignal(const double atr)
    double tpDist = 0.0;
    bool   signal = false;
 
+   if(InpEngine == QUEU_ENGINE_MICRO)
+     {
+      signal = MicroSignal(atr, dir, slDist, tpDist);
+     }
+   else
    if(InpEngine == QUEU_ENGINE_MEANREV)
      {
       signal = MeanRevSignal(atr, dir, slDist, tpDist);
@@ -1414,7 +1763,9 @@ void EvaluateSignal(const double atr)
    if(!EntryAllowed(atr))
       return;
 
-   OpenTrade(dir > 0, atr, slDist, tpDist);
+   if(OpenTrade(dir > 0, atr, slDist, tpDist) &&
+      InpEngine == QUEU_ENGINE_MICRO && g_msCandidateId != 0)
+      g_research.MarkTaken(g_msCandidateId);
   }
 
 //+------------------------------------------------------------------+
@@ -1683,6 +2034,35 @@ int OnInit(void)
                "attends-toi a beaucoup de signaux et verifie leur qualite au journal.");
      }
 
+   if(InpEngine == QUEU_ENGINE_MICRO)
+     {
+      if(!InpMS_UseAbsorption && !InpMS_UseContinuation)
+        {
+         Print("[Queu] Au moins un signal micro doit rester actif.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpMS_TargetR <= 0.0)
+        {
+         Print("[Queu] InpMS_TargetR doit etre strictement positif.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpMS_EffMax >= InpMS_CascadeEffMin && InpMS_UseAbsorption && InpMS_UseContinuation)
+         Print("[Queu] Attention : InpMS_EffMax >= InpMS_CascadeEffMin. Les deux "
+               "signaux se recouvrent, l'absorption sera toujours evaluee la premiere.");
+      if(PeriodSeconds(InpMS_ContextTF) <= PeriodSeconds(g_tf))
+        {
+         Print("[Queu] InpMS_ContextTF doit etre superieure a la TF de travail.");
+         return INIT_PARAMETERS_INCORRECT;
+        }
+      if(InpUseTrailing || InpUseBreakEven)
+         Print("[Queu] Attention : trailing ou break-even actif en micro-scalping, "
+               "alors que la cible est fixe et le time-stop court.");
+
+      Print("[Queu] RAPPEL : les features micro sont des PROXYS de cotation, pas du "
+            "flux d'ordres. Lance QueuBrokerAudit.mq5 pour savoir si ce broker "
+            "permet mieux.");
+     }
+
    if(InpUsePartial && (InpPartialPct <= 0.0 || InpPartialPct >= 100.0))
      {
       Print("[Queu] InpPartialPct doit etre dans ]0, 100[.");
@@ -1706,6 +2086,29 @@ int OnInit(void)
          Print("[Queu] Creation des handles EMA impossible.");
          return INIT_FAILED;
         }
+     }
+
+   if(InpEngine == QUEU_ENGINE_MICRO)
+     {
+      //--- g_hATR_TF1 sert ici a normaliser la pente du contexte
+      g_hATR_TF1 = iATR(g_sym, InpMS_ContextTF, InpATRPeriod);
+      if(g_hATR_TF1 == INVALID_HANDLE)
+        {
+         Print("[Queu] Creation du handle ATR de contexte impossible.");
+         return INIT_FAILED;
+        }
+
+      if(!g_tape.Init(g_sym, InpMS_WindowSec, InpMS_Capacity, InpMS_SpreadEmaTicks))
+        {
+         Print("[Queu] Initialisation de la bande de ticks impossible.");
+         return INIT_FAILED;
+        }
+
+      bool logCand = InpMS_LogCandidates && !MQLInfoInteger(MQL_OPTIMIZATION);
+      g_research.Init(StringFormat("Queu_Candidates_%s_%I64u.csv", g_sym, InpMagic), logCand);
+
+      ArrayResize(g_msLossTimes, 0);
+      g_msSilenceUntil = 0;
      }
 
    bool needSlowATR = (InpEngine == QUEU_ENGINE_MEANREV  && !InpMR_UseNested)
@@ -1771,6 +2174,10 @@ void OnDeinit(const int reason)
    if(g_hATR_TF1 != INVALID_HANDLE) IndicatorRelease(g_hATR_TF1);
    if(g_hATR_TF2 != INVALID_HANDLE) IndicatorRelease(g_hATR_TF2);
 
+   //--- vide les candidats encore ouverts, sinon la fin de periode les perd
+   if(InpEngine == QUEU_ENGINE_MICRO && g_research.Enabled())
+      g_research.Flush(iClose(g_sym, g_tf, 0));
+
    Comment("");
   }
 
@@ -1779,6 +2186,10 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick(void)
   {
+   //--- la bande de ticks se met a jour AVANT tout : cout constant
+   if(InpEngine == QUEU_ENGINE_MICRO)
+      g_tape.Update();
+
    double atr;
    if(!CopyOne(g_hATR, 0, 1, atr) || atr <= 0.0)
       return;
@@ -1791,8 +2202,17 @@ void OnTick(void)
    ManageOpenPositions(atr);
 
    //--- les entrees, elles, ne sont evaluees qu'a la cloture d'une bougie
+   //--- sorties forcees micro : time-stop, toxicite, spread. A chaque tick,
+   //--- une position de scalp ne doit pas attendre une cloture de bougie.
+   MicroManage();
+
    if(QIsNewBar(g_sym, g_tf, g_lastBar))
      {
+      //--- resout les candidats en attente sur la bougie qui vient de fermer
+      if(InpEngine == QUEU_ENGINE_MICRO && g_research.Enabled())
+         g_research.ResolveBar(iHigh(g_sym, g_tf, 1), iLow(g_sym, g_tf, 1),
+                               iClose(g_sym, g_tf, 1));
+
       CheckRegimeExit(atr);   // liberer avant d'evaluer une nouvelle entree
       EvaluateSignal(atr);
      }
@@ -1839,6 +2259,9 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
       g_arisk.PushR(r);
 
    g_journal.OnClose(posId, when, price, pnl, closedOut);
+
+   if(closedOut && haveR && r < 0.0 && InpEngine == QUEU_ENGINE_MICRO)
+      MicroPushLoss(when);
 
    if(closedOut && haveR && r < 0.0 && InpCooldownBars > 0)
      {

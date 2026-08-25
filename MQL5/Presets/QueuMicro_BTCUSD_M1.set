@@ -1,38 +1,59 @@
-; XAUUSD H1 - moteur CASSURE de canal Donchian.
-InpEngine=0
-InpMagic=770101
-InpComment=QueuBrk-XAU
-InpTimeframe=16385
-InpSlippagePoints=30
+; BTCUSD M1 - moteur MICRO-SCALPING sur proxys de microstructure.
+;
+; AVERTISSEMENT : les features ne sont PAS du flux d'ordres. Sur un compte
+; CFD retail il n'y a ni delta agresseur ni volume echange. quote_pressure
+; est la regle du tick appliquee au mid ; absorption est une inference
+; indirecte. Lance MQL5/Scripts/Queu/QueuBrokerAudit.mq5 pour savoir si ton
+; broker permet mieux.
+;
+; PROTOCOLE, DANS CET ORDRE :
+;   1. QueuBrokerAudit.mq5      -> le flux permet-il quoi que ce soit
+;   2. tools/scalp_breakeven.py -> le cout permet-il de scalper
+;   3. Backtest en ticks reels, InpMS_LogCandidates=true
+;   4. tools/research_micro.py Queu_Candidates_BTCUSD_770110.csv 60
+;
+; L'etape 4 est la seule qui tranche. Elle mesure, sur les candidats
+; REJETES autant que sur les pris, si chaque veto bloque des perdants ou
+; des gagnants, et si les features generalisent en validation purgee.
+;
+; Ne PAS optimiser les seuils avant d'avoir lu ce rapport : sans savoir
+; quelles features portent un signal, optimiser ne fait que sur-apprendre.
+;
+; Risque volontairement bas (0.15%) et perte journaliere plafonnee a 2%.
+InpEngine=5
+InpMagic=770110
+InpComment=QueuMicro-BTC
+InpTimeframe=1
+InpSlippagePoints=100
 InpShowPanel=true
 InpChannelPeriod=20
 InpATRPeriod=14
 InpAllowLong=true
 InpAllowShort=true
 InpCloseOnOpposite=false
-InpUseTrendFilter=true
+InpUseTrendFilter=false
 InpTrendTF=0
 InpEmaFast=21
 InpEmaSlow=50
-InpUseADXFilter=true
+InpUseADXFilter=false
 InpADXPeriod=14
 InpADXMin=20.0
 InpMinATRPoints=0.0
 InpMaxSpreadPoints=0.0
-InpMaxSpreadATRRatio=0.12
-InpRiskPercent=0.5
+InpMaxSpreadATRRatio=0.0
+InpRiskPercent=0.15
 InpFixedLot=0.0
 InpForceMinLot=false
 InpMaxPositions=1
-InpMaxDailyLossPct=3.0
+InpMaxDailyLossPct=2.0
 InpMaxDailyProfitPct=0.0
-InpCooldownBars=2
+InpCooldownBars=0
 InpSL_ATR=2.0
 InpTP_ATR=0.0
-InpUseBreakEven=true
+InpUseBreakEven=false
 InpBE_ATR=1.0
 InpBE_LockATR=0.10
-InpUseTrailing=true
+InpUseTrailing=false
 InpTrail_ATR=2.0
 InpTrailStepPoints=20.0
 InpMR_Period=50
@@ -107,7 +128,7 @@ InpReg_RequireAboveLong=true
 InpReg_ExitOnBreak=true
 InpReg_ExitOnChannel=true
 InpReg_ChannelMult=2.00
-InpUseERFilter=true
+InpUseERFilter=false
 InpERPeriod=20
 InpERMin=0.30
 InpBreakoutATR=0.10
@@ -129,7 +150,7 @@ InpTester_MinTrades=30
 InpTester_Trials=0
 InpTester_TrialsSD=0.0
 InpTester_MaxDDPct=30.0
-InpUseSession=true
+InpUseSession=false
 InpSessionFrom=7
 InpSessionTo=20
-InpSkipWeekend=false
+InpSkipWeekend=true
