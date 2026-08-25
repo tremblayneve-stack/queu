@@ -378,6 +378,67 @@ autres moteurs, délibérément.
 
 ---
 
+## Micro-scalping : ce que le flux d'un broker permet réellement
+
+Avant toute stratégie à l'échelle de la minute, il faut savoir ce que le broker
+publie. Sur un compte **CFD retail**, la réponse est sévère.
+
+| Ce qu'une spec order-flow demande | API MT5 | Sur un CFD BTCUSD/XAUUSD |
+|---|---|---|
+| Delta (sens de l'agresseur) | `MqlTick.flags` → `TICK_FLAG_BUY/SELL` | Renseigné **uniquement** en bourse. En CFD : `BID`/`ASK` seulement — des cotations, pas des transactions |
+| Volume réel échangé | `SYMBOL_VOLUME_REAL` | Généralement absent. Le `volume` des bougies est un **compte de ticks** |
+| Low Volume Node | dérivé du volume réel | Sans volume réel, on profile l'activité de cotation |
+| Carnet niveau 2 | `MarketBookAdd/Get` | Souvent vide ou synthétique |
+| Réaction « milliseconde » | `OnTick` | Événementiel sur cotation ; le testeur ne le modélise pas |
+
+**`MQL5/Scripts/Queu/QueuBrokerAudit.mq5` répond pour ton broker.** Script en
+lecture seule, à lancer sur le graphique du symbole. Il recense les flags des
+ticks, compare `tick_volume` et `real_volume`, teste le carnet, mesure la
+distribution du spread et la cadence, puis rend un verdict couche par couche.
+
+### L'arithmétique qui décide avant le signal
+
+Pour un scalp de stop `S`, cible `k·S` et coût aller-retour `c`, en posant
+`f = c/S` :
+
+```
+p* = (1 + f) / (k + 1)
+```
+
+`tools/scalp_breakeven.py` tabule ça :
+
+| f ↓ · cible → | 0,8 R | 1,3 R | 1,8 R |
+|---|---|---|---|
+| 0,00 | 55,6 % | 43,5 % | 35,7 % |
+| 0,20 | 66,7 % | 52,2 % | 42,9 % |
+| 0,30 | **72,2 %** | 56,5 % | 46,4 % |
+| 0,50 | 83,3 % | 65,2 % | 53,6 % |
+
+**Un stop serré n'améliore rien** — il augmente `f`, donc `p*`. « TP rapide
+0,8 R » et « SL serré » se combattent : à 0,8 R, dès que le coût atteint 30 %
+de la distance de stop, il faut 72 % de réussite. Zone morte.
+
+### Les proxys honnêtes
+
+`MQL5/Include/Queu/Microstructure.mqh` maintient une bande glissante de ticks à
+**coût constant** — pas d'appel à `CopyTicks` en boucle, pas de tri par tick.
+Les noms disent ce qui est mesuré :
+
+| Champ | Ce que c'est | Ce que ce **n'est pas** |
+|---|---|---|
+| `quotePressure` | règle du tick sur le mid, ∈ [−1,1] | **pas** le delta : direction des cotes, pas sens des agresseurs |
+| `absorption` | pression orientée qui ne déplace pas le prix | **pas** l'absorption au sens carnet — inférence indirecte |
+| `efficiency` | \|déplacement\| / chemin parcouru, au tick | — |
+| `flicker` | taux d'inversions de sens | — |
+| `toxicity` | **le pire** des composants, pas leur moyenne | un score de veto : une seule condition sévère doit suffire |
+
+Le tampon circulaire a été porté en Python et validé contre un calcul en force
+brute — ce qui a révélé un compteur d'inversions qui n'était jamais décrémenté
+à l'expiration (1992 comptées au lieu de 16), saturant `toxicity` à 1,0 de façon
+permanente. Corrigé et revérifié sur 41 points de contrôle.
+
+---
+
 ## Ce qui améliore réellement le rendement
 
 ### 1. Le critère d'optimisation (levier principal)
