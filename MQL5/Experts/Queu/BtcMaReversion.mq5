@@ -43,6 +43,20 @@ input double InpMinExpansionATR   = 1.0;   // Expansion MINIMALE sur N bougies (
 input int    InpExpansionBars     = 5;     // N : fenetre de mesure de l'expansion
 input double InpMaxDistATR        = 0.0;   // Distance MAXIMALE (0 = off) — ecarte les cassures
 
+input group "=== V2 : sequence acceleration -> rejet ==="
+input bool   InpUseSequence       = false; // ACTIVER LA V2 (false = comportement v1)
+input int    InpAccelBars         = 3;     // Fenetre de mesure de la poussee
+input double InpAccelMinATR       = 1.5;   // Poussee minimale sur cette fenetre (x ATR)
+input double InpAccelMinZ         = 2.0;   // Poussee minimale en ecarts-types (0 = off)
+input int    InpAccelZWindow      = 100;   // Fenetre de reference pour le z-score
+input int    InpSeqTimeoutBars    = 15;    // Abandon si aucun rejet apres N bougies
+input group "=== V2 : definitions du rejet (combinables) ==="
+input bool   InpRejRequireAll     = false; // true = toutes exigees, false = une suffit
+input int    InpRejStallBars      = 2;     // Aucun nouvel extreme depuis N bougies (0 = off)
+input bool   InpRejVelocityFlip   = true;  // L'ecart a la MA a commence a se resorber
+input double InpRejWickRatio      = 0.45;  // Meche de rejet / amplitude (0 = off)
+input double InpRejDecayFrac      = 0.40;  // Derniere bougie <= X x la poussee (0 = off)
+
 input group "=== Filtre de regime ==="
 input double InpMaxMASlopeATR     = 0.0;   // Pente max de la MA sur N bougies, x ATR (0 = off)
 input int    InpSlopeBars         = 20;    // Fenetre de mesure de la pente
@@ -71,6 +85,26 @@ CTrade   g_trade;
 int      g_hMA  = INVALID_HANDLE;
 int      g_hATR = INVALID_HANDLE;
 
+//--- Etat du detecteur de sequence (v2).
+//--- La v2 n'est pas un filtre supplementaire mais un AUTOMATE : elle
+//--- exige que la poussee ait eu lieu AVANT le rejet. Un test sans
+//--- memoire qui verifierait les deux conditions sur la meme bougie
+//--- accepterait des configurations ou le rejet precede la poussee,
+//--- ce qui n'a aucun sens.
+enum ENUM_SEQ_STATE
+  {
+   SEQ_IDLE     = 0,   // en attente d'une poussee
+   SEQ_EXTENDED = 1    // poussee validee, on guette le rejet
+  };
+
+ENUM_SEQ_STATE g_seqState   = SEQ_IDLE;
+int      g_seqDir           = 0;      // sens du trade envisage
+double   g_seqExtreme       = 0.0;    // extreme atteint depuis la poussee
+double   g_seqThrustATR     = 0.0;    // ampleur de la poussee qui a arme l'automate
+double   g_seqPrevDistATR   = 0.0;    // ecart a la MA a la bougie precedente
+int      g_seqBars          = 0;      // bougies depuis l'armement
+int      g_seqBarsNoExtreme = 0;      // bougies sans nouvel extreme
+
 ENUM_TIMEFRAMES g_tf = PERIOD_CURRENT;
 datetime g_lastBarTime = 0;
 double   g_point  = 0.0;
@@ -88,6 +122,11 @@ struct Context
    double   distATR;      // |ecart| en multiples d'ATR
    double   expansionATR; // croissance de l'ecart sur InpExpansionBars, en ATR
    double   slopeATR;     // pente de la MA sur InpSlopeBars, en ATR
+   double   thrustATR;    // poussee sur InpAccelBars, signee, en ATR
+   double   thrustZ;      // la meme poussee, en ecarts-types de sa propre loi
+   double   wickRatio;    // meche de rejet / amplitude de la bougie 1
+   double   lastMoveATR;  // |variation| de la bougie 1, en ATR
+   double   high1, low1;  // extremes de la bougie 1
   };
 
 //--- description d'un signal pret a l'execution
@@ -216,8 +255,14 @@ Context ReadContext(void)
    c.valid = false;
    c.ma1 = c.maPast = c.close1 = c.atr1 = 0.0;
    c.dist = c.distATR = c.expansionATR = c.slopeATR = 0.0;
+   c.thrustATR = c.thrustZ = c.wickRatio = c.lastMoveATR = 0.0;
+   c.high1 = c.low1 = 0.0;
 
-   const int needed = MathMax(InpExpansionBars, InpSlopeBars) + 2;
+   //--- profondeur requise par le plus gourmand des calculs
+   int needed = MathMax(InpExpansionBars, InpSlopeBars);
+   if(InpUseSequence)
+      needed = MathMax(needed, InpAccelBars + InpAccelZWindow);
+   needed += 2;
 
    double ma[], atr[];
    if(!ReadBuffer(g_hMA, 1, needed, ma))
@@ -252,6 +297,50 @@ Context ReadContext(void)
    c.maPast   = ma[sb];
    c.slopeATR = (c.ma1 - c.maPast) / c.atr1;
 
+   c.high1 = iHigh(_Symbol, g_tf, 1);
+   c.low1  = iLow(_Symbol, g_tf, 1);
+   c.lastMoveATR = MathAbs(closes[0] - closes[1]) / c.atr1;
+
+   //--- poussee : deplacement net sur la fenetre d'acceleration, signe
+   const int ab = MathMin(InpAccelBars, needed - 2);
+   if(ab >= 1)
+     {
+      const double thrust = closes[0] - closes[ab];
+      c.thrustATR = thrust / c.atr1;
+
+      //--- « anormale » exige un referentiel. On compare cette poussee a la
+      //--- LOI DE SES PROPRES POUSSEES sur une fenetre de reference : un
+      //--- seuil en ATR seul ne dit pas si le mouvement sort de l'ordinaire
+      //--- pour CE marche a CE moment.
+      const int zw = MathMin(InpAccelZWindow, needed - ab - 1);
+      if(InpAccelMinZ > 0.0 && zw > 2)
+        {
+         double sum = 0.0, sum2 = 0.0;
+         for(int i = 0; i < zw; i++)
+           {
+            const double m = MathAbs(closes[i] - closes[i + ab]);
+            sum  += m;
+            sum2 += m * m;
+           }
+         const double mean = sum / zw;
+         const double var  = sum2 / zw - mean * mean;
+         const double sd   = (var > 0.0) ? MathSqrt(var) : 0.0;
+         if(sd > 0.0)
+            c.thrustZ = (MathAbs(thrust) - mean) / sd;
+        }
+     }
+
+   //--- meche de rejet, du cote de l'extension : haute si le prix est
+   //--- au-dessus de la MA, basse s'il est en dessous
+   const double o1 = iOpen(_Symbol, g_tf, 1);
+   const double range = c.high1 - c.low1;
+   if(range > 0.0 && o1 > 0.0)
+     {
+      const double upper = c.high1 - MathMax(o1, c.close1);
+      const double lower = MathMin(o1, c.close1) - c.low1;
+      c.wickRatio = (c.dist > 0.0) ? upper / range : lower / range;
+     }
+
    c.valid = true;
    return c;
   }
@@ -281,13 +370,256 @@ bool ExcursionExtreme(const bool wantHigh, double &value)
 //+------------------------------------------------------------------+
 
 //+------------------------------------------------------------------+
-//| Construit le setup complet, ou renvoie invalide avec la raison.   |
-//|                                                                   |
-//| Ordre des tests : du moins couteux au plus couteux, et du plus    |
-//| discriminant au moins discriminant, pour que le journal indique   |
-//| la vraie cause du rejet.                                          |
+//| Filtre de regime, commun aux deux versions.                       |
+//| Fader une moyenne en pente forte revient a se placer devant le    |
+//| mouvement : mode d'echec principal du retour a la moyenne sur BTC.|
 //+------------------------------------------------------------------+
-Setup BuildSetup(const Context &c)
+bool RegimeAllows(const Context &c, const int dir)
+  {
+   if(InpMaxMASlopeATR <= 0.0 || dir == 0)
+      return true;
+
+   const bool against = (dir > 0 && c.slopeATR < 0.0) || (dir < 0 && c.slopeATR > 0.0);
+   if(against && MathAbs(c.slopeATR) > InpMaxMASlopeATR)
+     {
+      if(InpVerboseLog)
+         PrintFormat("[REGIME] Ecarte : pente de la MA %.2f ATR contre le trade "
+                     "(plafond %.2f).", c.slopeATR, InpMaxMASlopeATR);
+      return false;
+     }
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| V1 — porte SANS MEMOIRE : le prix est loin, et il y est arrive    |
+//| assez vite. Une seule bougie suffit a decider.                    |
+//+------------------------------------------------------------------+
+int GateStateless(const Context &c)
+  {
+   if(!c.valid)
+      return 0;
+
+   if(c.distATR < InpMinDistATR)
+      return 0;
+
+   if(InpMaxDistATR > 0.0 && c.distATR > InpMaxDistATR)
+     {
+      if(InpVerboseLog)
+         PrintFormat("[V1] Ecart %.2f ATR > plafond %.2f : cassure probable.",
+                     c.distATR, InpMaxDistATR);
+      return 0;
+     }
+
+   if(InpMinExpansionATR > 0.0 && c.expansionATR < InpMinExpansionATR)
+     {
+      if(InpVerboseLog)
+         PrintFormat("[V1] Ecart %.2f ATR mais expansion de seulement %.2f ATR "
+                     "sur %d bougies : derive, pas impulsion.",
+                     c.distATR, c.expansionATR, InpExpansionBars);
+      return 0;
+     }
+
+   return (c.dist > 0.0) ? -1 : 1;
+  }
+
+//+------------------------------------------------------------------+
+//| Remise a zero de l'automate de sequence.                          |
+//+------------------------------------------------------------------+
+void ResetSequence(const string why = "")
+  {
+   if(InpVerboseLog && g_seqState != SEQ_IDLE && why != "")
+      PrintFormat("[V2] Sequence abandonnee apres %d bougies : %s.", g_seqBars, why);
+
+   g_seqState        = SEQ_IDLE;
+   g_seqDir          = 0;
+   g_seqExtreme      = 0.0;
+   g_seqThrustATR    = 0.0;
+   g_seqPrevDistATR  = 0.0;
+   g_seqBars         = 0;
+   g_seqBarsNoExtreme = 0;
+  }
+
+//+------------------------------------------------------------------+
+//| V2 — porte A MEMOIRE : automate en deux temps.                    |
+//|                                                                   |
+//|   IDLE     --- poussee anormale detectee --->  EXTENDED           |
+//|   EXTENDED --- rejet confirme            --->  signal, puis IDLE  |
+//|   EXTENDED --- delai / MA franchie / ecart excessif ---> IDLE     |
+//|                                                                   |
+//| L'interet est l'ORDRE : la poussee doit preceder le rejet. Un     |
+//| test sans memoire qui verifierait les deux sur la meme bougie     |
+//| accepterait un rejet survenu AVANT la poussee, ce qui ne decrit   |
+//| aucun processus de retournement.                                  |
+//|                                                                   |
+//| On n'entre donc pas parce que le prix est loin, mais parce que le |
+//| mouvement qui l'a eloigne montre ses premiers signes d'echec.     |
+//+------------------------------------------------------------------+
+int GateSequence(const Context &c)
+  {
+   if(!c.valid)
+      return 0;
+
+   const int dirCand = (c.dist > 0.0) ? -1 : 1;
+
+   //================================================================
+   //  IDLE : chercher la poussee anormale
+   //================================================================
+   if(g_seqState == SEQ_IDLE)
+     {
+      if(c.distATR < InpMinDistATR)
+         return 0;
+      if(InpMaxDistATR > 0.0 && c.distATR > InpMaxDistATR)
+         return 0;
+
+      //--- la poussee doit aller DANS le sens de l'extension : un prix loin
+      //--- au-dessus de la MA qui vient de baisser n'est pas une poussee
+      const bool aligned = (c.dist > 0.0 && c.thrustATR > 0.0)
+                        || (c.dist < 0.0 && c.thrustATR < 0.0);
+      if(!aligned)
+         return 0;
+
+      if(InpAccelMinATR > 0.0 && MathAbs(c.thrustATR) < InpAccelMinATR)
+         return 0;
+
+      if(InpAccelMinZ > 0.0 && c.thrustZ < InpAccelMinZ)
+        {
+         if(InpVerboseLog)
+            PrintFormat("[V2] Poussee de %.2f ATR mais seulement %.2f ecarts-types : "
+                        "ordinaire pour ce marche.", MathAbs(c.thrustATR), c.thrustZ);
+         return 0;
+        }
+
+      //--- armement
+      g_seqState         = SEQ_EXTENDED;
+      g_seqDir           = dirCand;
+      g_seqExtreme       = (dirCand < 0) ? c.high1 : c.low1;
+      g_seqThrustATR     = MathAbs(c.thrustATR);
+      g_seqPrevDistATR   = c.distATR;
+      g_seqBars          = 0;
+      g_seqBarsNoExtreme = 0;
+
+      PrintFormat("[V2] ARME %s | ecart %.2f ATR | poussee %.2f ATR (%.2f sigma) "
+                  "| extreme %.2f. En attente du rejet.",
+                  (dirCand > 0 ? "ACHAT" : "VENTE"), c.distATR,
+                  g_seqThrustATR, c.thrustZ, g_seqExtreme);
+      return 0;                       // on n'entre pas encore
+     }
+
+   //================================================================
+   //  EXTENDED : guetter le rejet
+   //================================================================
+   g_seqBars++;
+
+   //--- la MA a ete franchie : la sur-extension n'existe plus
+   if(dirCand != g_seqDir)
+     {
+      ResetSequence("moyenne franchie");
+      return 0;
+     }
+
+   //--- l'ecart explose : ce n'est plus une sur-extension mais une cassure
+   if(InpMaxDistATR > 0.0 && c.distATR > InpMaxDistATR)
+     {
+      ResetSequence(StringFormat("ecart %.2f ATR au-dela du plafond", c.distATR));
+      return 0;
+     }
+
+   //--- suivi de l'extreme
+   const double ext = (g_seqDir < 0) ? c.high1 : c.low1;
+   const bool newExtreme = (g_seqDir < 0) ? (ext > g_seqExtreme) : (ext < g_seqExtreme);
+   if(newExtreme)
+     {
+      g_seqExtreme       = ext;
+      g_seqBarsNoExtreme = 0;
+     }
+   else
+      g_seqBarsNoExtreme++;
+
+   if(InpSeqTimeoutBars > 0 && g_seqBars >= InpSeqTimeoutBars)
+     {
+      ResetSequence("aucun rejet dans le delai");
+      return 0;
+     }
+
+   //--- conditions de rejet, chacune desactivable pour pouvoir mesurer
+   //--- laquelle porte reellement le signal
+   int enabled = 0, met = 0;
+   string detail = "";
+
+   if(InpRejStallBars > 0)
+     {
+      enabled++;
+      if(g_seqBarsNoExtreme >= InpRejStallBars)
+        {
+         met++;
+         detail += StringFormat("stagnation %d bougies; ", g_seqBarsNoExtreme);
+        }
+     }
+
+   if(InpRejVelocityFlip)
+     {
+      enabled++;
+      if(c.distATR < g_seqPrevDistATR)
+        {
+         met++;
+         detail += StringFormat("ecart se resorbe %.2f->%.2f; ",
+                                g_seqPrevDistATR, c.distATR);
+        }
+     }
+
+   if(InpRejWickRatio > 0.0)
+     {
+      enabled++;
+      if(c.wickRatio >= InpRejWickRatio)
+        {
+         met++;
+         detail += StringFormat("meche de rejet %.0f%%; ", c.wickRatio * 100.0);
+        }
+     }
+
+   if(InpRejDecayFrac > 0.0 && g_seqThrustATR > 0.0)
+     {
+      enabled++;
+      if(c.lastMoveATR <= InpRejDecayFrac * g_seqThrustATR)
+        {
+         met++;
+         detail += StringFormat("essoufflement %.2f vs poussee %.2f ATR; ",
+                                c.lastMoveATR, g_seqThrustATR);
+        }
+     }
+
+   //--- memorise l'ecart pour la comparaison de la bougie suivante
+   g_seqPrevDistATR = c.distATR;
+
+   if(enabled == 0)
+     {
+      static bool warned = false;
+      if(!warned)
+        {
+         Print("[V2] Aucune condition de rejet active : la sequence ne peut "
+               "jamais se declencher. Active au moins une condition.");
+         warned = true;
+        }
+      return 0;
+     }
+
+   const bool fire = InpRejRequireAll ? (met == enabled) : (met > 0);
+   if(!fire)
+      return 0;
+
+   const int dir = g_seqDir;
+   PrintFormat("[V2] REJET confirme apres %d bougies (%d/%d conditions) : %s",
+               g_seqBars, met, enabled, detail);
+
+   //--- la sequence est consommee, qu'elle debouche ou non sur un ordre
+   ResetSequence();
+   return dir;
+  }
+
+//+------------------------------------------------------------------+
+//| Geometrie du trade, commune aux deux versions : stop, cible, R:R. |
+//+------------------------------------------------------------------+
+Setup BuildGeometry(const Context &c, const int dir)
   {
    Setup s;
    s.valid = false;
@@ -295,51 +627,9 @@ Setup BuildSetup(const Context &c)
    s.entry = s.sl = s.tp = s.rr = 0.0;
    s.reason = "";
 
-   if(!c.valid)
+   if(!c.valid || dir == 0)
       return s;
 
-   //--- 1. le prix est-il assez LOIN de la moyenne ?
-   if(c.distATR < InpMinDistATR)
-      return s;
-
-   //--- ecart absurde : au-dela, ce n'est plus une sur-extension mais une
-   //--- cassure de regime, et le retour a la moyenne n'a plus de raison
-   if(InpMaxDistATR > 0.0 && c.distATR > InpMaxDistATR)
-     {
-      if(InpVerboseLog)
-         PrintFormat("[SIGNAL] Ecart %.2f ATR > plafond %.2f : cassure probable.",
-                     c.distATR, InpMaxDistATR);
-      return s;
-     }
-
-   //--- 2. s'en est-il eloigne VITE ? Une derive lente est une tendance.
-   if(InpMinExpansionATR > 0.0 && c.expansionATR < InpMinExpansionATR)
-     {
-      if(InpVerboseLog)
-         PrintFormat("[SIGNAL] Ecart de %.2f ATR mais expansion de seulement "
-                     "%.2f ATR sur %d bougies : derive, pas impulsion.",
-                     c.distATR, c.expansionATR, InpExpansionBars);
-      return s;
-     }
-
-   //--- 3. filtre de regime : fader une MA en pente forte revient a se
-   //---    placer devant le mouvement. C'est le mode d'echec principal du
-   //---    retour a la moyenne sur BTC.
-   const int dir = (c.dist > 0.0) ? -1 : 1;   // au-dessus -> vendre
-
-   if(InpMaxMASlopeATR > 0.0)
-     {
-      const bool against = (dir > 0 && c.slopeATR < 0.0) || (dir < 0 && c.slopeATR > 0.0);
-      if(against && MathAbs(c.slopeATR) > InpMaxMASlopeATR)
-        {
-         if(InpVerboseLog)
-            PrintFormat("[SIGNAL] Ecarte : pente de la MA %.2f ATR contre le trade "
-                        "(plafond %.2f).", c.slopeATR, InpMaxMASlopeATR);
-         return s;
-        }
-     }
-
-   //--- geometrie
    const double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    const double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
    if(ask <= 0.0 || bid <= 0.0)
@@ -347,8 +637,8 @@ Setup BuildSetup(const Context &c)
 
    s.entry = (dir > 0) ? ask : bid;
 
-   //--- stop : multiple d'ATR, eventuellement recule derriere l'extreme
-   //--- de l'excursion pour ne pas se faire sortir par la meche qui a
+   //--- stop : multiple d'ATR, eventuellement recule derriere l'extreme de
+   //--- l'excursion pour ne pas se faire sortir par la meche qui a
    //--- justement cree le signal
    double slPrice = (dir > 0) ? s.entry - InpSL_ATR * c.atr1
                               : s.entry + InpSL_ATR * c.atr1;
@@ -360,37 +650,30 @@ Setup BuildSetup(const Context &c)
         {
          const double buffer = InpExtremeBufferATR * c.atr1;
          const double beyond = (dir > 0) ? extreme - buffer : extreme + buffer;
-         //--- on ne garde que le plus PROTECTEUR des deux
          slPrice = (dir > 0) ? MathMin(slPrice, beyond) : MathMax(slPrice, beyond);
         }
      }
 
-   //--- cible : la moyenne mobile. C'est la sortie principale ; la gestion
-   //--- dynamique fermera plus tot si la MA vient a la rencontre du prix.
    const double tpPrice = c.ma1;
-
-   const double risk   = MathAbs(s.entry - slPrice);
-   const double reward = MathAbs(tpPrice - s.entry);
+   const double risk    = MathAbs(s.entry - slPrice);
+   const double reward  = MathAbs(tpPrice - s.entry);
 
    if(risk <= 0.0 || reward <= 0.0)
       return s;
 
-   //--- la cible doit etre du bon cote de l'entree
    if((dir > 0 && tpPrice <= s.entry) || (dir < 0 && tpPrice >= s.entry))
      {
       if(InpVerboseLog)
-         Print("[SIGNAL] Ecarte : la MA est deja depassee, plus rien a capter.");
+         Print("[GEO] Ecarte : la MA est deja depassee, plus rien a capter.");
       return s;
      }
 
    s.rr = reward / risk;
 
-   //--- sur ce schema le stop est large et la cible proche : sans ce filtre
-   //--- on risque regulierement 3 pour gagner 1
    if(InpMinRR > 0.0 && s.rr < InpMinRR)
      {
       if(InpVerboseLog)
-         PrintFormat("[SIGNAL] Ecarte : ratio %.2f < %.2f exige.", s.rr, InpMinRR);
+         PrintFormat("[GEO] Ecarte : ratio %.2f < %.2f exige.", s.rr, InpMinRR);
       return s;
      }
 
@@ -399,11 +682,11 @@ Setup BuildSetup(const Context &c)
    s.tp    = tpPrice;
    s.valid = true;
    s.reason = StringFormat(
-                 "%s | close=%.2f MA=%.2f ecart=%.2f ATR (min %.2f) | expansion=%.2f ATR "
-                 "sur %d bougies | pente MA=%.2f ATR | ATR=%.2f | RR=%.2f",
-                 (dir > 0 ? "ACHAT" : "VENTE"), c.close1, c.ma1, c.distATR,
-                 InpMinDistATR, c.expansionATR, InpExpansionBars, c.slopeATR,
-                 c.atr1, s.rr);
+                 "%s [%s] | close=%.2f MA=%.2f ecart=%.2f ATR | expansion=%.2f | "
+                 "poussee=%.2f ATR (%.2f sigma) | pente MA=%.2f | ATR=%.2f | RR=%.2f",
+                 (dir > 0 ? "ACHAT" : "VENTE"), (InpUseSequence ? "V2" : "V1"),
+                 c.close1, c.ma1, c.distATR, c.expansionATR,
+                 c.thrustATR, c.thrustZ, c.slopeATR, c.atr1, s.rr);
    return s;
   }
 
@@ -691,6 +974,7 @@ int OnInit(void)
 
    //--- amorce : pas d'evaluation de la bougie deja en cours a l'attachement
    g_lastBarTime = iTime(_Symbol, g_tf, 0);
+   ResetSequence();
 
    PrintFormat("[INIT] BtcMaReversion | %s | TF de travail %s | MA %s(%d) sur %s | "
                "ATR %d | dist>=%.2f exp>=%.2f | SL %.1fx | risque %.2f%% | magic %I64u",
@@ -753,7 +1037,16 @@ void OnTick(void)
      }
 
    const Context c = ReadContext();
-   Setup s = BuildSetup(c);
+
+   //--- une seule ligne separe la v1 de la v2 : c'est ce qui permet a
+   //--- l'optimiseur de comparer les deux logiques sur les memes donnees,
+   //--- en faisant du choix un simple parametre balayable
+   const int dir = InpUseSequence ? GateSequence(c) : GateStateless(c);
+
+   if(dir == 0 || !RegimeAllows(c, dir))
+      return;
+
+   Setup s = BuildGeometry(c, dir);
    if(s.valid)
       ExecuteSetup(s);
   }
