@@ -701,6 +701,7 @@ L'outil affiche les deux valeurs exactes à recopier.
 | `QueuReversal_XAUUSD_M1.set` | XAUUSD **M1** | **Retournement.** M3/M5 épuisés, rebond confirmé, D=1 S=2 T=+1, magic 770108 |
 | `QueuReversal_BTCUSD_M1.set` | BTCUSD **M1** | **Retournement.** N=60, risque 0,15 %, week-end exclu, magic 770109 |
 | `QueuMicro_BTCUSD_M1.set` | BTCUSD **M1** | **Micro-scalping.** Proxys de microstructure, log des candidats actif, risque 0,15 %, magic 770110 |
+| `VModel22_NAS100_M5.set` | NAS100.s **M5** | **V MODEL v2.2 Hardened** (EA `VModel22Hardened.mq5`). Continuation FVG multi-TF, session NY, signaux seulement par défaut, magic 20261150 — voir [docs/VModel22Hardened.md](docs/VModel22Hardened.md) |
 
 Les magic numbers des presets de régression sont distincts : les deux moteurs
 peuvent tourner **en parallèle** sur le même compte sans se marcher dessus.
